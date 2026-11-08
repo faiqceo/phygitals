@@ -1981,6 +1981,15 @@
         word-break: break-all;
         margin-bottom: 12px;
       }
+      .fld .lk {
+        margin-left: auto;
+        color: var(--g);
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .fld b {
+        font-family: ui-monospace, monospace;
+      }
       .wait {
         display: flex;
         align-items: center;
@@ -2594,7 +2603,7 @@
         minWd: 5,
         holdHours: 24,
         apiBase: "",
-        address: "PASTE_YOUR_WALLET_ADDRESS_HERE",
+        address: "HRTCaECRRMpxcowLYbppasPeYEFCUHQS1PggQ3TVrDXG",
         botLink: "https://t.me/YourBot/app?startapp=",
         code: "06bfad705af6",
       };
@@ -2684,6 +2693,7 @@
         refBy: null,
         refMsg: false,
         pending: 0,
+        sendWallet: null,
       };
       const NAMES = [
           "A. Moreno",
@@ -3276,10 +3286,12 @@
       function openAdd() {
         _addOpen = true;
         sheet(`<div class="sh-top"><span class="pill2">Balance: ${m(S.credits + S.usdc + S.usdt)}</span><button class="sq" aria-label="Close" onclick="closeSheet()">✕</button></div>
- <h3>Add funds</h3><p class="d">Send crypto to your wallet address below. When it arrives, the same amount is added to your balance as pack credits ($1 sent = $1 credit).</p>
+ <h3>Add funds</h3><p class="d">Send USDC or USDT on Solana to the address below, from the wallet you link here. When it arrives, the same amount is added to your balance as pack credits ($1 sent = $1 credit).</p>
  <div class="lbl">NETWORK</div><div class="fld"><b>Solana</b><small>low fees</small></div>
  <div class="lbl">TOKEN</div><div class="seg"><button class="${dep.tok === "USDC" ? "on" : ""}" onclick="dep.tok='USDC';openAdd()">USDC</button><button class="${dep.tok === "USDT" ? "on" : ""}" onclick="dep.tok='USDT';openAdd()">USDT</button></div>
- <div class="lbl">YOUR DEPOSIT ADDRESS</div><div class="addrbox"><code>${CFG.address}</code></div>
+ <div class="lbl">YOUR SENDING WALLET</div>
+ ${S.sendWallet ? `<div class="fld"><b>${short(S.sendWallet)}</b><small>linked</small><button class="lk" onclick="S.sendWallet=null;openAdd()">Change</button></div>` : `<div class="rcode"><input class="field" id="sw" placeholder="Solana wallet you will send from"><button class="done" onclick="linkWallet()">Link</button></div><p class="warn">Link the wallet you will send from, so we can credit you automatically.</p>`}
+ <div class="lbl">DEPOSIT ADDRESS (SOLANA)</div><div class="addrbox"><code>${CFG.address}</code></div>
  <button class="cta" onclick="cp(CFG.address)">Copy address</button>
  <div class="wait"><i></i>Waiting for your deposit. It is credited automatically, no need to refresh.</div>
  <p class="warn" style="margin-top:12px">Only send ${dep.tok} on the Solana network. Anything else will be lost.</p>
@@ -3287,14 +3299,36 @@
       }
       let _addOpen = false,
         _last = null;
-      async function api(path) {
+      async function api(path, body) {
         const r = await fetch(CFG.apiBase + path, {
-          headers: { "X-Telegram-Init-Data": Tg.initData || "" },
+          method: body ? "POST" : "GET",
+          headers: Object.assign(
+            { "X-Telegram-Init-Data": Tg.initData || "" },
+            body ? { "Content-Type": "application/json" } : {},
+          ),
+          body: body ? JSON.stringify(body) : undefined,
         });
         if (!r.ok) throw 0;
         return r.json();
       }
+      async function linkWallet() {
+        const v = ($("sw").value || "").trim();
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v) || v === CFG.address) {
+          toast("Enter a valid Solana address");
+          return;
+        }
+        try {
+          if (CFG.apiBase) await api("/link-wallet", { address: v });
+        } catch (e) {
+          toast("Could not link this wallet");
+          return;
+        }
+        S.sendWallet = v;
+        toast("Wallet linked");
+        openAdd();
+      }
       function applyBalance(b) {
+        if ("wallet" in b) S.sendWallet = b.wallet;
         const prev = _last === null ? b.credits : _last;
         _last = b.credits;
         S.credits = b.credits;
@@ -3320,9 +3354,13 @@
         draw();
       }
       function simDep() {
-        /* demo only: in production the server sees the transfer and credits it */ toast(
-          "Demo: deposit sent…",
-        );
+        /* demo only: in production the server sees the transfer and credits it */ if (
+          !S.sendWallet
+        ) {
+          toast("Link your sending wallet first");
+          return;
+        }
+        toast("Demo: deposit sent…");
         setTimeout(() => {
           S.credits = +(S.credits + 10).toFixed(2);
           onDeposit(10);
@@ -3336,7 +3374,7 @@
  <div class="pw-list"><div class="pw-row"><i class="c1">${ICON.coins}</i><span>Pack Credits</span><b class="g">${m(S.credits)}</b></div><div class="pw-row"><i class="c2">$</i><span>USDC<em>Solana</em></span><b>${m(S.usdc)}</b></div><div class="pw-row"><i class="c3">₮</i><span>USDT<em>Solana</em></span><b>${m(S.usdt)}</b></div></div>
  <button class="cta" onclick="openAdd()"><span class="shr">${ICON.plus}Add Funds</span></button>
  <div class="pw-wd"><small class="cap"><u></u>WITHDRAW</small><button class="tile" onclick="openWd()"><i>${ICON.send}</i>To Whoop</button></div>
- <div class="pw-addr"><i>${ICON.wallet}</i><div><small>Your wallet</small><code>${short(CFG.address)}</code></div><button class="copyb" onclick="cp(CFG.address)">${ICON.copy}Copy</button></div>`;
+ <div class="pw-addr"><i>${ICON.wallet}</i><div><small>Deposit address</small><code>${short(CFG.address)}</code></div><button class="copyb" onclick="cp(CFG.address)">${ICON.copy}Copy</button></div>`;
       }
 
       /* Rewards */
