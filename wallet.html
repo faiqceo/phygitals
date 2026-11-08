@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wallet</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0b0c;--card:#171718;--card2:#202022;--line:#262628;--tx:#fff;--mut:#8a8a8f;--g1:#3ddc97;--g2:#0fb36f;--red:#ff5d5d;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{background:var(--bg);color:var(--tx);font:16px/1.4 -apple-system,"SF Pro Display",Inter,system-ui,sans-serif;min-height:100vh;max-width:480px;margin:0 auto;padding:16px}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+button:focus-visible,input:focus-visible{outline:2px solid var(--g1);outline-offset:2px}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.top h1{font-size:22px;flex:1}
+.sq{width:44px;height:44px;border-radius:14px;background:var(--card2);border:1px solid var(--line);display:grid;place-items:center}
+.hero{border-radius:26px;padding:26px;background:linear-gradient(135deg,#143b2c,#1a1a1c 70%);border:1px solid #1f3a2f;margin-bottom:14px}
+.hero small{color:var(--g1);font-weight:600;letter-spacing:.14em;font-size:12px}
+.hero b{display:block;font-size:48px;margin-top:14px;letter-spacing:-.02em}
+.list{background:var(--card);border:1px solid var(--line);border-radius:22px;margin-bottom:16px}
+.row{display:flex;align-items:center;gap:14px;padding:16px;border-bottom:1px solid var(--line)}
+.row:last-child{border:0}
+.row .n{flex:1;font-weight:600}
+.row .tag{font-size:11px;color:var(--mut);background:var(--card2);padding:3px 9px;border-radius:99px;margin-left:8px;font-weight:600}
+.ic{width:48px;height:48px;border-radius:50%;display:grid;place-items:center;font-weight:700;flex:none}
+.ic.p{background:#183327;color:var(--g1)}.ic.u{background:#2775ca}.ic.t{background:#26a17b}
+.pos{color:var(--g1)}
+.cta{width:100%;height:60px;border-radius:99px;font-weight:700;font-size:17px;background:linear-gradient(90deg,var(--g1),var(--g2));color:#04140d;margin-bottom:16px}
+.cta[disabled]{opacity:.4}
+.wd{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:16px;margin-bottom:16px}
+.wd h2{font-size:12px;color:var(--mut);letter-spacing:.12em;margin-bottom:12px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tile{background:var(--card2);border:1px solid var(--line);border-radius:18px;padding:20px 8px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:10px}
+.tile i{width:56px;height:56px;border-radius:50%;background:#183327;color:var(--g1);display:grid;place-items:center;font-style:normal;font-size:22px}
+.addr{display:flex;align-items:center;gap:14px;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:14px}
+.addr div{flex:1}.addr small{color:var(--mut);display:block}.addr code{font-weight:700}
+.copy{background:var(--card2);border:1px solid var(--line);padding:10px 16px;border-radius:14px;font-weight:600}
+/* sheet */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:opacity .2s}
+.scrim.on{opacity:1;pointer-events:auto}
+.sheet{position:fixed;left:0;right:0;bottom:0;max-width:480px;margin:0 auto;background:#121213;border-radius:28px 28px 0 0;padding:12px 18px calc(18px + env(safe-area-inset-bottom,0px));transform:translateY(105%);transition:transform .25s ease;max-height:94vh;overflow:auto}
+.sheet.on{transform:none}
+.grab{width:44px;height:5px;border-radius:9px;background:#3a3a3d;margin:0 auto 14px}
+.sh-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.pill{background:var(--card2);padding:8px 14px;border-radius:99px;font-size:14px;color:var(--mut)}
+.big{font-size:64px;font-weight:700;text-align:center;margin:18px 0 4px;letter-spacing:-.03em}
+.sub{text-align:center;color:var(--mut);font-size:14px;min-height:20px}
+.chips{display:flex;gap:8px;margin:18px 0 8px}
+.chips button{flex:1;padding:12px 0;border-radius:99px;background:var(--card2);color:var(--mut);font-weight:600;border:1px solid var(--line)}
+.chips button.on{background:#143b2c;color:var(--g1);border-color:#1f5a41}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);margin-bottom:12px}
+.pad button{height:62px;font-size:26px;font-weight:600}
+.white{width:100%;height:58px;border-radius:99px;background:#fff;color:#000;font-weight:700;font-size:17px}
+.link{display:block;margin:12px auto 0;color:var(--mut);font-size:14px}
+.sheet h3{font-size:28px;margin:8px 0 4px}
+.sheet p.d{color:var(--mut);margin-bottom:16px}
+.lbl{font-size:12px;color:var(--mut);letter-spacing:.1em;margin:14px 0 8px}
+.field{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:16px;color:var(--tx);font:inherit}
+.sum{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:6px 16px;margin:14px 0}
+.sum div{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line);font-size:15px}
+.sum div:last-child{border:0;font-weight:700}
+.sum span:first-child{color:var(--mut)}.sum div:last-child span:first-child{color:var(--tx)}
+.dark{width:100%;height:58px;border-radius:99px;background:var(--card2);border:1px solid var(--line);font-weight:700;margin-top:10px}
+.qr{width:150px;height:150px;margin:14px auto;border-radius:16px;background:repeating-conic-gradient(#fff 0 25%,#111 0 50%) 0 0/20px 20px;border:8px solid #fff}
+.warn{color:#e8c46a;font-size:13px;margin-top:8px}
+.toast{position:fixed;left:50%;bottom:90px;transform:translate(-50%,20px);background:#fff;color:#000;padding:12px 20px;border-radius:99px;font-weight:600;opacity:0;transition:.2s;pointer-events:none}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="top">
+  <button class="sq" aria-label="Back" onclick="Tg.close()">←</button>
+  <h1>Wallet</h1>
+  <button class="sq" aria-label="Refresh" onclick="refresh()">⟳</button>
+</div>
+
+<div class="hero"><small>AVAILABLE</small><b id="avail">$0.00</b></div>
+
+<div class="list">
+  <div class="row"><div class="ic p">◎</div><div class="n">Pack Credits</div><b class="pos" id="b-pack">$0.00</b></div>
+  <div class="row"><div class="ic u">$</div><div class="n">USDC<span class="tag">Solana</span></div><b id="b-usdc">$0.00</b></div>
+  <div class="row"><div class="ic t">₮</div><div class="n">USDT<span class="tag">Solana</span></div><b id="b-usdt">$0.00</b></div>
+</div>
+
+<button class="cta" onclick="openAdd()">+&nbsp; Add Funds</button>
+
+<div class="wd">
+  <h2>WITHDRAW</h2>
+  <div class="two">
+    <button class="tile" onclick="openWd('bank')"><i>🏛</i>To Bank</button>
+    <button class="tile" onclick="openWd('wallet')"><i>➤</i>To Wallet</button>
+  </div>
+</div>
+
+<div class="addr">
+  <div class="ic p">▣</div>
+  <div><small>Your wallet</small><code id="addr-s"></code></div>
+  <button class="copy" onclick="copyAddr()">Copy</button>
+</div>
+
+<div class="scrim" id="scrim" onclick="closeSheet()"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---- Config: placeholders, set real values from your backend ---- */
+const CFG={cardPct:0.10,cardFlat:0.21,       // $5 -> $0.71 like the design
+           netFee:0.50,bankPct:0.01,minWd:5,
+           address:"Gv9xGpQ4mT2rKd8LbXn3VhY7sUeW1jZcAoPq5RtX7cvo"};
+const S={pack:0,usdc:0.10,usdt:0};   // dummy data
+const Tg=(window.Telegram&&Telegram.WebApp)||{ready(){},expand(){},close(){},HapticFeedback:null,setHeaderColor(){},setBackgroundColor(){}};
+Tg.ready();Tg.expand();try{Tg.setHeaderColor("#0b0b0c");Tg.setBackgroundColor("#0b0b0c")}catch(e){}
+
+const $=id=>document.getElementById(id);
+const m=n=>"$"+n.toFixed(2);
+const short=a=>a.slice(0,6)+"..."+a.slice(-5);
+function render(){
+  $("b-pack").textContent=m(S.pack);$("b-usdc").textContent=m(S.usdc);$("b-usdt").textContent=m(S.usdt);
+  $("avail").textContent=m(S.pack+S.usdc+S.usdt);$("addr-s").textContent=short(CFG.address);
+}
+function toast(t){const e=$("toast");e.textContent=t;e.classList.add("on");setTimeout(()=>e.classList.remove("on"),1800)}
+function haptic(){try{Tg.HapticFeedback&&Tg.HapticFeedback.impactOccurred("light")}catch(e){}}
+function refresh(){haptic();render();toast("Balances updated")}
+function copyAddr(){navigator.clipboard&&navigator.clipboard.writeText(CFG.address).catch(()=>{});toast("Address copied")}
+function openSheet(html){$("sheet").innerHTML='<div class="grab"></div>'+html;$("scrim").classList.add("on");$("sheet").classList.add("on")}
+function closeSheet(){$("scrim").classList.remove("on");$("sheet").classList.remove("on")}
+
+/* ---- Add funds: card / Apple Pay ---- */
+let amt="5";
+function fee(a){return a>0?+(a*CFG.cardPct+CFG.cardFlat).toFixed(2):0}
+function openAdd(){amt="5";
+  openSheet(`<div class="sh-top"><span class="pill">Balance: <span id="a-bal"></span></span><button class="sq" aria-label="Close" onclick="closeSheet()">✕</button></div>
+  <div class="big" id="a-amt"></div><div class="sub" id="a-fee"></div>
+  <div class="chips" id="chips"></div>
+  <div class="pad" id="pad"></div>
+  <button class="white" id="a-pay" onclick="pay()"></button>
+  <button class="link" onclick="openCrypto()">Deposit crypto instead</button>`);
+  $("a-bal").textContent=m(S.pack+S.usdc+S.usdt);
+  $("chips").innerHTML=[5,25,50,1000].map(v=>`<button data-v="${v}" onclick="setAmt('${v}')">$${v.toLocaleString()}</button>`).join("");
+  $("pad").innerHTML=["1","2","3","4","5","6","7","8","9","","0","⌫"].map(k=>k?`<button onclick="key('${k}')" aria-label="${k==='⌫'?'Delete':k}">${k}</button>`:"<span></span>").join("");
+  upAdd();
+}
+function setAmt(v){amt=v;upAdd()}
+function key(k){if(k==="⌫")amt=amt.slice(0,-1);else if(amt.length<5)amt=(amt==="0"?"":amt)+k;upAdd()}
+function upAdd(){const a=+amt||0,f=fee(a);
+  $("a-amt").textContent="$"+(amt||"0");
+  $("a-fee").textContent=a?`+ card fees: ${m(f)} · You get ${m(a)} pack credits`:"Enter an amount";
+  document.querySelectorAll("#chips button").forEach(b=>b.classList.toggle("on",b.dataset.v===amt));
+  const p=$("a-pay");p.textContent=a?`Pay ${m(a+f)} with Apple Pay`:"Pay with Apple Pay";p.disabled=!a;p.style.opacity=a?1:.4}
+function pay(){const a=+amt;if(!a)return;haptic();
+  /* TODO: call backend to create payment; credit only after it confirms */
+  S.pack+=a;render();closeSheet();toast(m(a)+" added to Pack Credits")}
+
+/* ---- Add funds: crypto ---- */
+function openCrypto(){
+  openSheet(`<div class="sh-top"><button class="sq" aria-label="Back" onclick="openAdd()">←</button><b>Deposit</b><span style="width:44px"></span></div>
+  <h3>Add funds</h3><p class="d">Pick a network and token, then generate a deposit address.</p>
+  <div class="lbl">NETWORK</div>
+  <select class="field" id="net"><option>Solana · low fees</option></select>
+  <div class="lbl">TOKEN</div>
+  <select class="field" id="tok"><option>USDC · Stablecoin</option><option>USDT · Stablecoin</option></select>
+  <button class="dark" onclick="showAddr()">Show deposit address</button>`);
+}
+function showAddr(){const t=$("tok").value.split(" ")[0];
+  openSheet(`<div class="sh-top"><button class="sq" aria-label="Back" onclick="openCrypto()">←</button><b>${t} on Solana</b><span style="width:44px"></span></div>
+  <div class="qr" role="img" aria-label="QR code placeholder"></div>
+  <p class="d" style="text-align:center;word-break:break-all"><code>${CFG.address}</code></p>
+  <button class="white" onclick="copyAddr()">Copy address</button>
+  <p class="warn" style="text-align:center">Only send ${t} on Solana to this address. Other tokens or networks will be lost.</p>`);
+}
+
+/* ---- Withdraw ---- */
+let wd={type:"wallet",tok:"usdc"};
+function openWd(type){wd={type,tok:"usdc"};
+  const bank=type==="bank";
+  openSheet(`<div class="sh-top"><button class="sq" aria-label="Close" onclick="closeSheet()">✕</button><b>Withdraw to ${bank?"bank":"wallet"}</b><span style="width:44px"></span></div>
+  <div class="lbl">FROM</div>
+  <select class="field" id="w-tok" onchange="wd.tok=this.value;upWd()"><option value="usdc">USDC · Solana</option><option value="usdt">USDT · Solana</option></select>
+  <div class="lbl">AMOUNT</div>
+  <input class="field" id="w-amt" inputmode="decimal" placeholder="0.00" oninput="upWd()">
+  <div class="lbl">${bank?"BANK ACCOUNT NUMBER":"SOLANA WALLET ADDRESS"}</div>
+  <input class="field" id="w-to" placeholder="${bank?"Account number":"Paste address"}" oninput="upWd()">
+  <div class="sum">
+    <div><span>Amount</span><span id="s-a">$0.00</span></div>
+    <div><span>${bank?"Payout fee (1%) + network":"Network fee"}</span><span id="s-f">$0.00</span></div>
+    <div><span>You receive</span><span id="s-r">$0.00</span></div>
+  </div>
+  <p class="warn" id="w-err"></p>
+  <button class="white" id="w-go" onclick="doWd()">Confirm withdrawal</button>`);
+  upWd();
+}
+function wdFee(a){return a?+(CFG.netFee+(wd.type==="bank"?a*CFG.bankPct:0)).toFixed(2):0}
+function upWd(){const a=+$("w-amt").value||0,f=wdFee(a),bal=S[wd.tok];let err="";
+  if(a&&a<CFG.minWd)err="Minimum withdrawal is "+m(CFG.minWd);
+  else if(a>bal)err="Amount is more than your "+wd.tok.toUpperCase()+" balance ("+m(bal)+")";
+  else if(a&&f>=a)err="Amount doesn’t cover the fee";
+  $("s-a").textContent=m(a);$("s-f").textContent=m(f);$("s-r").textContent=m(Math.max(a-f,0));
+  $("w-err").textContent=err;
+  $("w-go").disabled=!a||!!err||!$("w-to").value.trim();$("w-go").style.opacity=$("w-go").disabled?.4:1}
+function doWd(){const a=+$("w-amt").value;haptic();
+  /* TODO: backend call; show real tx status */
+  S[wd.tok]-=a;render();closeSheet();toast("Withdrawal submitted")}
+
+render();
+</script>
+</body>
+</html>
