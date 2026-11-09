@@ -2705,8 +2705,8 @@
         feePct: 0,
         minWd: 10,
         holdHours: 24,
-        apiBase: "",
-        address: "HRTCaECRRMpxcowLYbppasPeYEFCUHQS1PggQ3TVrDXG",
+        apiBase: "/api",
+        address: "",
         botLink: "https://t.me/Phygitalls_bot?startapp=",
         code: "06bfad705af6",
       };
@@ -2780,7 +2780,7 @@
       ];
       let PACKS = FB_PACKS;
       const S = {
-        credits: 100,
+        credits: 0,
         usdc: 0,
         usdt: 0,
         cards: [],
@@ -2929,7 +2929,8 @@
         $("main").innerHTML =
           `<div class="cats">${PACKS.map((p, i) => `<button class="cat" onclick="pick(${i})"><span class="b" style="background:${p.bg}">${S.sec === "fb" ? `<img src="${BALLIMG}" alt="">` : sc.icon}</span>${p.name}</button>`).join("")}</div>
  <div class="car" id="car">${PACKS.map((p) => `<div class="slide">${packArt(p)}</div>`).join("")}</div>
- <div class="stats" id="st"></div><button class="cta" id="buy" onclick="buy()"></button>`;
+ <div class="stats" id="st"></div><button class="cta" id="buy" onclick="buy()"></button>
+ ${CFG.apiBase ? `<p class="warn" style="text-align:center;margin-top:12px">Pack opening and card payouts are disabled until they are processed securely by the server.</p>` : ""}`;
         const car = $("car");
         car.addEventListener(
           "scroll",
@@ -2964,7 +2965,10 @@
           .forEach((e, i) => e.classList.toggle("on", i === S.sel));
         $("st").innerHTML =
           `<div><small>Min Value</small><b>${m(mn)}</b></div><div class="sep"></div><div><small>Max Pull</small><b>${m(mx)}</b></div><div class="sep"></div><button class="odds" onclick="oddsSheet()"><small>Odds</small><b>View ›</b></button>`;
-        $("buy").textContent = "Buy for " + m(p.price);
+        $("buy").disabled = !!CFG.apiBase;
+        $("buy").textContent = CFG.apiBase
+          ? "Pack purchases unavailable"
+          : "Buy for " + m(p.price);
       }
       function ev(p) {
         return p.odds.reduce((a, [v, o]) => a + (v * o) / 100, 0);
@@ -2987,6 +2991,10 @@
         return p.odds[0][0];
       }
       function buy() {
+        if (CFG.apiBase) {
+          toast("Pack purchases are not available yet");
+          return;
+        }
         const p = PACKS[S.sel];
         if (S.credits < p.price) {
           toast("Not enough credits. Tap + to add funds");
@@ -3299,12 +3307,20 @@
         later(() => tick(0), 1950);
       }
       function keep() {
+        if (CFG.apiBase) {
+          toast("Card collection is not connected to the server yet");
+          return;
+        }
         S.cards.push(window._c);
         closeSheet();
         toast("Added to your collection");
         draw();
       }
       function sell(a, to) {
+        if (CFG.apiBase) {
+          toast("Card payouts are not connected to the server yet");
+          return;
+        }
         S[to] += a;
         closeSheet();
         toast(`${m(a)} added to ${to === "usdc" ? "USDC" : "pack credits"}`);
@@ -3336,12 +3352,20 @@
         return sb;
       }
       function sellOwned(id, to) {
+        if (CFG.apiBase) {
+          toast("Card payouts are not connected to the server yet");
+          return;
+        }
         const sb = takeCard(id, to);
         closeSheet();
         toast(`${m(sb)} added to ${to === "usdc" ? "USDC" : "pack credits"}`);
         draw();
       }
       function cashOut(id) {
+        if (CFG.apiBase) {
+          toast("Card payouts are not connected to the server yet");
+          return;
+        }
         takeCard(id, "usdc");
         draw();
         openWd();
@@ -3378,14 +3402,24 @@
         g.disabled = !a || !!e || !$("w-to").value.trim();
         g.style.opacity = g.disabled ? 0.4 : 1;
       }
-      function doWd() {
+      async function doWd() {
         const a = +$("w-amt").value;
-        /* TODO: backend call, show real tx status */ S[wd.tok] = +(
-          S[wd.tok] - a
-        ).toFixed(2);
-        closeSheet();
-        toast("Withdrawal to Whoop submitted");
-        draw();
+        const destination = $("w-to").value.trim();
+        const button = $("w-go");
+        button.disabled = true;
+        try {
+          await api("/withdraw", {
+            token: wd.tok,
+            amount: a.toFixed(2),
+            destination,
+          });
+          closeSheet();
+          toast("Withdrawal request submitted for review");
+          await poll();
+        } catch (e) {
+          toast(e.message || "Could not submit withdrawal");
+          upWd();
+        }
       }
       let dep = { tok: "USDC" };
       function openAdd() {
@@ -3396,11 +3430,11 @@
  <div class="lbl">TOKEN</div><div class="seg"><button class="${dep.tok === "USDC" ? "on" : ""}" onclick="dep.tok='USDC';openAdd()">USDC</button><button class="${dep.tok === "USDT" ? "on" : ""}" onclick="dep.tok='USDT';openAdd()">USDT</button></div>
  <div class="lbl">YOUR SENDING WALLET</div>
  ${S.sendWallet ? `<div class="fld"><b>${short(S.sendWallet)}</b><small>linked</small><button class="lk" onclick="S.sendWallet=null;openAdd()">Change</button></div>` : `<div class="rcode"><input class="field" id="sw" placeholder="Solana wallet you will send from"><button class="done" onclick="linkWallet()">Link</button></div><p class="warn">Link the wallet you will send from, so we can credit you automatically.</p>`}
- <div class="lbl">DEPOSIT ADDRESS (SOLANA)</div><div class="addrbox"><code>${CFG.address}</code></div>
+ <div class="lbl">DEPOSIT ADDRESS (SOLANA)</div>${CFG.address ? `<div class="addrbox"><code>${CFG.address}</code></div>
  <button class="cta" onclick="cp(CFG.address)">Copy address</button>
- <div class="wait"><i></i>Waiting for your deposit. It is credited automatically, no need to refresh.</div>
+ <div class="wait"><i></i>Waiting for your confirmed deposit. It is credited automatically.</div>` : `<p class="warn">Crypto deposits are not configured right now.</p>`}
  <p class="warn" style="margin-top:12px">Only send ${dep.tok} on the Solana network. Anything else will be lost.</p>
- ${CFG.apiBase ? "" : `<button class="sec" onclick="simDep()">Simulate a $10 deposit (demo)</button>`}`);
+ `);
       }
       let _addOpen = false,
         _last = null;
@@ -3413,8 +3447,18 @@
           ),
           body: body ? JSON.stringify(body) : undefined,
         });
-        if (!r.ok) throw 0;
-        return r.json();
+        const text = await r.text();
+        let result = null;
+        if (text) {
+          try {
+            result = JSON.parse(text);
+          } catch {
+            throw new Error("The server returned an invalid response.");
+          }
+        }
+        if (!r.ok)
+          throw new Error(result?.error || "Request failed. Please try again.");
+        return result;
       }
       async function linkWallet() {
         const v = ($("sw").value || "").trim();
@@ -3423,9 +3467,35 @@
           return;
         }
         try {
-          if (CFG.apiBase) await api("/link-wallet", { address: v });
+          const provider = window.solana;
+          if (!provider?.signMessage) {
+            toast("Open this app in a Solana wallet that supports message signing");
+            return;
+          }
+          const connection = provider.publicKey
+            ? provider
+            : await provider.connect();
+          if (connection.publicKey?.toString() !== v) {
+            toast("Enter the connected wallet address");
+            return;
+          }
+          const challenge = await api("/link-wallet/challenge", {
+            address: v,
+          });
+          const signed = await provider.signMessage(
+            new TextEncoder().encode(challenge.message),
+            "utf8",
+          );
+          const signature = signed.signature || signed;
+          await api("/link-wallet", {
+            address: v,
+            nonce: challenge.nonce,
+            signature: btoa(
+              String.fromCharCode(...new Uint8Array(signature)),
+            ),
+          });
         } catch (e) {
-          toast("Could not link this wallet");
+          toast(e.message || "Could not link this wallet");
           return;
         }
         S.sendWallet = v;
@@ -3447,12 +3517,17 @@
         if (!CFG.apiBase || document.hidden) return;
         try {
           applyBalance(await api("/balance"));
+          _apiFailed = false;
           if (S.tab === "rewards") {
             applyProfile(await api("/rewards"));
             draw();
           }
-        } catch (e) {}
+        } catch (e) {
+          if (!_apiFailed) toast(e.message || "Could not refresh your balance");
+          _apiFailed = true;
+        }
       }
+      let _apiFailed = false;
       function onDeposit(d) {
         hap("ok");
         if (_addOpen) {
@@ -3461,19 +3536,6 @@
   <button class="cta" onclick="closeSheet();go('packs')">Open a pack</button><button class="sec" style="margin-top:10px" onclick="closeSheet()">Done</button></div>`);
         } else toast("+" + m(d) + " added to your pack credits");
         draw();
-      }
-      function simDep() {
-        /* demo only: in production the server sees the transfer and credits it */ if (
-          !S.sendWallet
-        ) {
-          toast("Link your sending wallet first");
-          return;
-        }
-        toast("Demo: deposit sent…");
-        setTimeout(() => {
-          S.credits = +(S.credits + 10).toFixed(2);
-          onDeposit(10);
-        }, 1200);
       }
       function drawProfile() {
         const tot = S.credits + S.usdc + S.usdt;
@@ -3519,11 +3581,12 @@
         }
         if (CFG.apiBase) {
           try {
-            applyProfile(await api("/redeem", { code: v }));
-            S.refMsg = true;
+            const profile = await api("/redeem", { code: v });
+            applyProfile(profile);
+            S.refMsg = !!profile.referralAwarded;
             draw();
           } catch (e) {
-            toast("That code didn’t work");
+            toast(e.message || "That code didn’t work");
           }
           return;
         }
@@ -3581,14 +3644,18 @@
       }
       async function continueTg() {
         try {
-          if (CFG.apiBase) applyProfile(await api("/signup", { ref: START }));
+          if (CFG.apiBase) {
+            const profile = await api("/signup", { ref: START });
+            applyProfile(profile);
+            S.refMsg = !!profile.referralAwarded;
+          }
           else if (START && okCode(START)) {
             S.refBy = { name: "@friend", date: today() };
             S.credits += CFG.refBonus;
             S.refMsg = true;
           }
         } catch (e) {
-          toast("Could not sign in. Try again");
+          toast(e.message || "Could not sign in. Try again");
           return;
         }
         S.welcomed = true;

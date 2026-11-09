@@ -1,0 +1,10 @@
+{
+  "name": "phygitals",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server.js",
+    "test": "node --test"
+  }
+}
