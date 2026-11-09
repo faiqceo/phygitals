@@ -2557,6 +2557,109 @@
         font-size: 13px;
         padding: 10px 16px;
       }
+
+      #wl {
+        position: fixed;
+        inset: 0;
+        z-index: 40;
+        background: radial-gradient(circle at 50% 28%, #1c2a22, #000 70%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: calc(26px + env(safe-area-inset-top, 0px)) 22px
+          calc(20px + env(safe-area-inset-bottom, 0px));
+        overflow: auto;
+        transition: opacity 0.3s;
+      }
+      #wl.out {
+        opacity: 0;
+      }
+      .wl-logo {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font:
+          800 28px Sora,
+          sans-serif;
+        letter-spacing: -0.04em;
+      }
+      .wl-logo img {
+        width: 30px;
+        height: 30px;
+      }
+      .fan {
+        position: relative;
+        width: min(80vw, 320px);
+        height: min(42vh, 300px);
+        margin: 22px 0 14px;
+        flex: none;
+      }
+      .fc {
+        position: absolute;
+        left: 50%;
+        top: 0;
+        width: 58%;
+        transform-origin: 50% 100%;
+      }
+      .fc.c {
+        transform: translateX(-50%);
+        z-index: 3;
+        filter: drop-shadow(0 18px 24px rgba(0, 0, 0, 0.7));
+      }
+      .fc.l {
+        transform: translateX(-104%) rotate(-10deg) scale(0.88);
+        z-index: 1;
+      }
+      .fc.r {
+        transform: translateX(4%) rotate(10deg) scale(0.88);
+        z-index: 2;
+      }
+      #wl h1 {
+        font:
+          800 25px Sora,
+          sans-serif;
+        text-align: center;
+        letter-spacing: -0.02em;
+      }
+      .wl-sub {
+        color: var(--mut);
+        text-align: center;
+        margin: 8px 0 16px;
+        font-size: 14px;
+      }
+      .wl-sub u {
+        color: #c9f7d6;
+        text-decoration: underline;
+        text-decoration-color: var(--g);
+        text-decoration-thickness: 2px;
+        text-underline-offset: 4px;
+      }
+      .wl-ref {
+        background: #143b2c;
+        border: 1px solid #1f5a41;
+        color: #c9f7d6;
+        padding: 9px 14px;
+        border-radius: 14px;
+        font-size: 12.5px;
+        margin-bottom: 12px;
+        text-align: center;
+      }
+      #wl .cta {
+        max-width: 380px;
+        margin-top: auto;
+      }
+      .wl-fine {
+        color: #6f6f75;
+        font-size: 11px;
+        text-align: center;
+        margin-top: 12px;
+        max-width: 330px;
+      }
+      .wl-fine a {
+        color: #a9a9ae;
+        font-weight: 700;
+        text-decoration: underline;
+      }
     </style>
   </head>
   <body>
@@ -2598,50 +2701,64 @@
       const CFG = {
         refBonus: 1,
         buyback: 0.9,
-        netFee: 0.5,
-        feePct: 0.01,
-        minWd: 5,
+        netFee: 3.29,
+        feePct: 0,
+        minWd: 10,
         holdHours: 24,
         apiBase: "",
         address: "HRTCaECRRMpxcowLYbppasPeYEFCUHQS1PggQ3TVrDXG",
-        botLink: "https://t.me/YourBot/app?startapp=",
+        botLink: "https://t.me/Phygitalls_bot?startapp=",
         code: "06bfad705af6",
       };
       const BALLIMG =
         "data:image/webp;base64,UklGRqokAABXRUJQVlA4WAoAAAAQAAAAlQAAlQAAQUxQSMYJAAABHIEAwX82ERExAawKxJQWbduFbWsldXht27Zt+z7btm3btm3btt+17XsPK8lqLUkpWfUfEQ4DoG0bGRWMZcfpXhfIiSRJkCRWJx1/ACed9ET+LdNsOyszq55AREiUJLlumzWO9wBw3ANASnbyBeCxMcZ1S70nvSPGgHDLcLbRcy2q06hFl4GjJ4wbO2bk0AF9enRu3bgWj+wuyFMpi9wwJc37zzz+irtf+fi7P5Zt2l1etmf3jq0b1qxY/MePHzx09Zn7jmxVYm2P81wYttNiwil3vP3PxjKF6Vv5pj9fv/nEca0KAID8dGacoj5HPvbnHrSaFELIFM3sBa2265+XTutjGZx4fY+TX1uLuglrrsrQrOWsqWuf268NN9ckUcUAGi58Yq19yyTMzTbVDFX+/+LJ3QEYo6k6nv2j0E7cmLMhocz0e3uZ3dNTfa5fiqgijnshBOLyy1pTEvY9sd+d6xFFVHkaQvz9uIZG0FFdb9lolDLNs/jh8LpakJgF0OSCFYiO6jHrtswj7qt9CrVJIPm+P1rKWXMgxCvDvJuMQZdHw8g6hMTmi+sDY37LDlyCyrlCxGx3IRnqSeO16TEb3hlimGoWgYfb9vNKgHsrG/RZgktqEuLL3fwcjAHsuyrm0UXSXDTdxxIcgrPKMFSEW4g7jtNLOM9adyiMKaNaJa8tcgwOjZ5FqcuIQ+Ej9ZyCQ7O3Ex7zhJd4uZFDBNDiQ2v9XOCtxs7AofUn8etTX+LNho7Aod2XyUn7iK/VdwIObb82mSc8VwrMQTb92GS+cF8hywoGDd9NyJwsdk1Wi/GiJ10nKkSl0DOkOCQjAjjbeSKiVed78bV9M4HD1J1KKuewEz3j07qMZchO/6NwryLCETA1rJoMRc879mgM1OAZpNw5LjU4HBp6eH2bMe5WTAluQ982AZYyOy5278E53Vz6nSG5bPezdMTgDuc5e6fX8pKxjtciVD0feCruu8nHiq9kvUG7hfG4L9XP9RlLwzehcF+kfSGR3Qt7pj547rZdlII4a7/K1zvxApYPYBUdKVaQanOvZHA4HaUfpxsY1CxfuG3VU0FSMNboF8dMufo9APMyGVJuxbZTKqckEYdjlPSsCXaMPLHpbdTbxYzFc70fUPhacxSaIETMxsxM7kDVqmpePHE4xBPDn4hQIx04OPnWqw9K44ix2l97WYXW8OBrYZjaYziFGEsVxlIA+/r+KMwme9lNv4GleqUwbqDwLcdvx7cHYNoFpMuQ6kypdo6MEochu/SIl3aCmMwJyE7dBiwal6FQ9KL2ifA6KLCohU0M6n1PMEIAxg9U2ikHQ2Dz7CrTpy4hpg+wdV8oYMyK21AoRRHtpKVWEjdZn7MY1LJeT/IhrLVpp5vgMGAHSkUXGHXrOMwEwqr+61Ch1gEca5IoSm0Sob2s7641g4dIf6MRc2t8jq3b4RAwaPArCsoBF4Fxdy3E+4Fz6L/N7hAv8Lu1ZSnwh5q6e3CoqAfCIJGls6U7MH4vCvI5YKJ7Yx5Aq2+soG9ozhuEeDrA3M16JA+YeW9wN8BZIc38339FK2VX5jO4xD+NS2+tzGVuJ67p1uixCpXLJk+dPntpYsfEjm9X51PRv8wxMSr3HfprbuevvnXKU/begDJna7L8GppEd524J2/BG3xyeTXmTPUtIf68D3PmXWHx4yjzpa+w6LHcBNdWUjyapzi9PJ2jzrrFx//P0g7ad/Yt/qbeoXVP8cvtxC/o7nIb/vZywsGPeA6HTeAH5xCLVH0gcovnjqTJapE0LCKwxd0zy+iRr9lROXYuG7RZd8liJ3isWih1dPul1ELOy7Jhxl9AySWExLJpxL6LrU9DqT2bxFjTlT+HIbHHlq04o6q/7Pm6JlyKgr4ejAIBiMcKIT4GsJc+DB2gbU8tR6l4CDwfoNdWlARZSCCgT57kWjfNfIA6P6GgGGC7dUC5WUnfqXcDBvdjSDJrEH7eiCZWflIMARxOw958RJDVtCRp/kHEoedmJAPYY+oBLPCJYAJLFc6CgEHp54SeKc38hOB0SOD/m+oRDpeQe1URCT3LaUm7DPFBYNZvpcR+qWGxcyvrIfknwH0gAG0Uf4witx+qivWT0Z9LAziTYPAMm39a5tB1PZ0uqxBlypUhVdkY6zdcYz1IjBgDD2dBge8V6wubJuxRMrddTKw+RI9HLko+QEHq5JHrFBbVy7vp/62h4Qgd7XuALl/cEb9AkRSqHjzbcJSa/e2VpKyRLoPTrVBlWd5WRxzO9Ulj+TUwlz6eV9/nbtDgyqR/WLVe5JPsUagojPa8OKgQtbKDiVi61GuXyE900UgJ2KXr/IvNnHhq+58/jOr3n2dpD0v5r6WOJJwqPQ1TtAzw9ebiY/4OUp1oefFdVv9LbzSKj3eqyjf80Oov6jLNibRPhZQe7TEWpfCEu5RlMw0nU+GTfiieCrzrAG6bwCcLDKegLot8gSL+0jC5kDW9DafC0dXehzsZrA5wZsoExotfcvh5hhHQ1qe9kNdrai8loNvfXiz7VMH0gWOVBqm9LOoOVqa0Rm1Q0inRVBzvFVbqIqOq3Ed76VsAJwghPbjEU4kAYNSBCHUN44bTS347Ov9VPj9XGr1VIT5cahdlsOq9j6HbMTAZ1RE7kM+bGy8j2nyHwmUMz8/nhcX0X0z6mMyMnn+5Xlz2JWzW5tHssi8ZEZeZFhixAkPnb6G01DH89ucfrpxgf/B0ICesTgce4V5WTDLpCONXul3MLdTeyov1l3/GR0edDI5aiqErOj/5UX6/jXaIIX9jSO+bmKb35+vZTtHrOwylIt2kxG96p9HZny/fQUkaQuErbWztWNa/R6GgGyFWX1fLTucyOHET2SoZ4vrjmJcEYACjvkAliJb9MAoYA/ADDo1u2qNNgq54qDXwaHqpghk/IrUlhcTlRwXRMl8mg2a3lqEgJKRA+VJviKZXc+aXqCeRUfj7wYXRMt9m3VMX60mSxEFw7VXNY1wCZrur12gh/Kstd/SCGJeAqUW3G1Zq4bFcCMSKZ4fFKSKmFl0uX4S+lpZCIm5+ZhIDZs2iJtqe/nmZEY4Naerxr6v7QeQgFEWtua9tRzRXultnyxtHtgBgKWZROlzNKQ8vCxFRn6d0c4fBPV9fOrjQui5NIyx4133v+F5PNw+6UKS6H0lpNmQ5O7+5bkpdiD62qAuApsNPePzvKrSbOfkwFDFNod22f3XFuIag621FXthnx1pNOeGap75csqUak9vOFT+8ds8FBw2uk+DkZAisVtqi9+QDTr7q3idefOvd995988XH7rjs+PlD29dh9vZinHwNJZ0sy7CrXJYGQaBPPG4f1jZ81wJWUDggvhoAABBaAJ0BKpYAlgA+MRaIQyIhIRVI/lAgAwS0gGfXEAegB+lfWceRXmEH0AeS/95/GXzV8gvt/95/ar96fWu7zXVH/P9D/5r+Cvz/93/cL80PvR2O8AX8u/nH+A/LjxZO9ft1/y/UC9rfqf+N/uX7j/4n42fxf9f+VXup4gH6lf6H80P8B89/9H/GeLt6T7AP8w/rH+V/xv7g/3f6hv8r/sf6v/Rf9f/ce3T9i/0f/G/03+c/Yb7Bf5F/P/8h/b/8d/3P8N///+p97HsM/b32M/1Tb5dT+A6XcQ6yTf/7gxQgqgDVmTiyteysUGyrohRUgXRWJx9j2gUh0Ml6TAGGgi0710CBLPXujMM3lgBVf/qEYMsgukHlQyi54ojf/3DAuthc7ZZwry39R6Hn7KYnDWNf07VrgJTZzTivL5z7iLNkyDTob20jckun2EeLEQFetLTz4JAjn8h/AOt4IMB+ksq1nfpynNAeWQWvaHZgyJ1sJ2n3KwNJWPoea9HGXmHyeITsQSysLiUtNu6cj1HDrL5cdE9zYzOQzNeNHfYtci5C46E/WNam+ZuYyw68UtucjRCdoIkORbRuKp1Cj7nfZoY/CcyfN+4D1DlKAgg4GO73aBSAzPnblyo4ldMB45k1hatiPY0risjQ1deGVzyB3C14KkC8HHgHvjaMaLpQrhTJQbc37w2LEuQ/j+97N3euP23fK4+XatsPWZwpiUy2TUcweL1/az28bdPF07oZVgq7H+ou6zmHkstHvws0vi1r/uvgue5GuB+XbfrI7UfldRb+kjbz2GD52rjB8cEANK+AgPJsSq8RgJ8CIXPJVt8l8eQ+2NHNtWDAlMf8UKJ+uCCdWkj9atsWk0Hl0kxmdQSXm8nkKtd0Gy785Or0tzGMVWOqlPGjbopEF/7WEvU3f+mAEfLpwW1oc7nGBcg8L266OhVLccjGWfPtM6ewxbdC8C7oF4bDW6M9QAD+/2AZQ/7vGEJHhV7Sq0XdlIreVaNCsxCYF+yssZSwdns0RBR5FJVR1aZ+CkBdUF6Ps5hb/4ly5r8Nb/K8+YDK6dTm42ZyaIgmMmFIunVS8h8yGnUqG+qaNrzf3kHQHbjBXQv69NbhLn4a0SIAc7QaXXBvWmg9Xg1CULnt/yXwcip7SvjHzXqraGanbw/BQl5iJiUZ3t/G4XGmEoHpNovOSIW88LfoIovavlGRjIWmIuGHDBgaxpWG7xbt7ynr3IQxiq70ESa+l4F10GqxJH5vbZuAdsno/Dgy9CL0+FOblXnPWA/DoqMq5wda4ESPKAAS4txqeD8RHOB99lMsaLfqICr/srwd8Gk9+M/ek01y+z4HfBRC8DSmZgrHaDOU0DBb1srrn6oOmo9vn+YWMvpVfZOSO84lcCXrm5hfIFaciRjFSI7V26x0HxmbRUekyeQ8YEbMWuAfWconDkfWbnO7iW96flvPInzVdfriisxd56LyH+3YtYm10Z2SeIPFv2PGfotRdE3rtZ1D0Son6ZbxRwkClZYfP+DDY0MwH2FdYZYqEEGrSjzx0YkEk+ziCVOUcj9BBs6CHet/+GaSY4DL/aSRH1cA/0upo4eO8O5vtq//aPSyHqvDSJNualzwel/iXBd7f+CyB/Js79vH31K2amwtkGUCfySnCwC8O5qRowkoPC1OAzGcav67XfimT2ZOKY/61mEDyU39Po6uqud2lBw1N/Lnnx8W4G7xEF1F0FkRxTkzhX6jBWauwvRGLvaLK2890mSRWudkfTPc1rH8j3OrVVPnlz9fmerS2t5l/vawO3/SiUlnKHMhovJaCkPWRhFNDoOPerAAwmQH/jg9gSNycbiU9dZAtl913WxmY6FlXaRbIdEAITRKB1SRYjSSRu8nSy6gWBUCiiolL/CxmsDWZEI/Bk4OtJtRgJuZ8DJjz/8jUM39n9pe0iewAOWdHVVvyd+Oc2Te7VAOj5oWWCie70unv51FTOLhSzRJxErN5tOjOmLmNEal0VPeDZj5HNDEX8F2MSE76qeNAX0r5ZpCgpH26KN36Cia7MC8T+rO1dhZeNcgQ+OfxE79I4UUTWpQVuymR/uK4dTLfEPzxVTrbacJMcQGIFrAKtshRCTR0uA84SQm5pFErN/AJbihrrM7pyXY0a1tzMVSpFB9df+QEAWRmrZfORjeDQMYxKjdxNS9oEYYnb6sJrqO/gA/xmcfdylLHDyflk8p2ZM/IpadmkZ+Vjt9s/UAYUBaFh4EAqJ7ojzj3aNp6r6SRw2Dpya8Rqf7//gDd65+zUFkGbNMwZlMgroHAb3NGw62Pw5CZxHMLDoXN5lgd/hlpWjuHDlYUVmpogU7aDv9XiNuDQLG0pQzj/9eziweUiP2O+AXerfL4v73p6SZOm1Va4jmezIupR7TEgbjGw0nVfnymjddyGbxE5youMTvbIs8ZvkVzCgqv+Li8rtjFVIeJys4YQXVbo93/WUnycPw/wj22plSNnof7KLlw0xjxseIhS05ULTIPvjisW+3ugNeexlL++80KI/kDakSvz10BKTHrCB4UQeNvt7jkqG1zVA1JLuv9Ppsbq2gu8eAow1Hb3ljrrOCNi1OdTmQxQHTEjyyKU99dJOyuOU0x/R59eeTIcYcsTiwlmvJSJF//MXQC0cqEPcymd2i3LAcWF26n0BmbkrpT1eUKQ9XFqoIIaFnuQsPLT8HvGVkNcHJivLOYn7hFHniGkSd3tbeGygET49gYZ1DrXdadqLaBHeREpoHL/Tx/2znwmHeNgRuK9Epx/oNEfJ+uCrVqiU8S9hnkdEKY8NVNWvX9eE9vsIuNN3UhuCxquUBpFqmex1E+BRxnJinXCc0rW7jSY5Y0/5t28bcQ+sggcXtmusz26AIsBbJfRX1FOmbxHGx3iStqQcCjEkvf7uxaB0QEvx1FTtF4ERnKIgLcUV1RLCNg0a5YDViwlSn8pz13cFyNNbaRSoH728q3SppVCia91qpElnQ9rccNioF7X2ofFEaw6pqJjUXFpqHWW8TqSjKirDVULBLXYlOvxBkiso5X0GiRZxtOEeEMepfhgnrCiscMpZChnFtxDy06AZyRIaUNlR0Iipud2imT/msj5MiyofYW/ph3l7OjD9QAEoDiK7CXgS+gbsS/dWBZlfsHUTNcjQKbavugTrVx1jIh8YMrJFsXnO4k1NhQ0gxbKPjkXTdTym6jZdkNqIeuKQ4rh8TYU/ze5H9+4sajCdcw46tdexNcGvgkTnzSuNjf5cc/EW2lfJjY9ECjKPUqWDLsoc7i31zgli5l6mTpWmgukxy5CQw5sUlht0kBL23uPnKebczgeoT9uZS2d0qfo2TM80go38W0OHDrIi4AZaFlTiO0DQUDMwnmKAtr09lV/Xm6NjQEZAN5l2uk7akelqYGrjQWXlTasjdvpeyMABtD6AcwRV7hdYNVogA2xNfimW7i3Y8Sw4nEL7XVSAr+hSW5o/pl9JbuslOw6FhaTpI4dg7N57X0JUTMXQe42pv5wR2L3HrYuDHbpUIyzFVUdCRajlRap4MqX1WTQ6RM1qY1EK0hlXMlGJa3aOvxF38gDzrICE42/RUQeGe+9EbCI7JLZMygRemFAg6yJP3t+Of9Q3U6a9huWY6ytwDsP0ZXgzIl8qPgRj+CwSM56p/qUK6f1LAqZpLCtzyrAK40dfBmJNuAqRC9/TfcKUK/MQLC3RY73ze3N3DX9s9/j+PyGC/F9BrgyZf0eN4uP1OQHngSytqLXLc+Im5YGT87ESKVm6LoHTLDvlWvirmc/DlUvyu5mEAOaNTGkCTeSwZTbctq+eRhZ6J1XdVJPgFYwLwSUzIpyzHAHX1a6H76X4X3xRYfZfAv2tSwq3Ub4N8gyDjB9ArJ7fpVBbRb9JMDqsxn9qGfwp3TzsJyBOP3mfZR08Xz/vgkQDm9Didpc7+VRGluI3b1ffhZWQVClagx8t/rusQ5wdZrxDzQSaNt/Sjso3OCE/Wxuro8D46N8l6LoX6mtNErPxIysoqQzg9RknLjNIfHewX46WI2of8mhk4aEREqYNks8PLhp8HXGCNMxSgx+z+cwYI/8IFVDwQOoi/SGv92XR8V/VgCD35qg8nPmnN0SmiDJohQV5kuPlLKT5L9Dkeg3wwtTpstbQLw/V2yH32gVSc3vYWJ1lOamO+MwRnzS5cGX/sk+rC+P2dDgBW2Vcnu+Y1OKTSLO5s/FfIKx+Issm03Ny/O1E6T627ieEK/OEP0XM4PWZebPK37vVl57/KmtonWdDZWN+3ZDAKSPpxWvVSHTV4u8XX2e7a+XqzUGvUo8sJssmWEvCHeCixcL94bSUlQnKuyYhemYyAKGDOa0vPuu4QlCMedZa2C1CItC5e7kFeJZg9DXcKv3fmFRwCL+688harFpl3Kkt2IAVGY2+wo/Ym1kWxIWG2u+M4nX8dtIr+l1xIH8Qj9PW/5Hq63rSFUiZwzD8KmDELBCxr2tu26dW54s0x7mhi6KCT96TXiV+ZNA/NND/jdUeld7cJ3GjBKsnqvkEHbmrvQ9b3Hs6acw5cPb5P2KpkqIWUeM6qjrJfceGsep9GHX0q4mw2sBDLZyG4ImxScqL5lSRi/muJqvIimqUDo4RcrPCF6H+HqrD/Ruzq9Kbu7I2IaNWEcaMLoZuSfq3GFPvf7GwBCodBdSTVQaQm6rtXd/q4xAODDGYFfS1+hNgYIklPKN1gTZ984JzwMx21thHnPZ5ZJ9CRImbhDdEKUefQbwwu1RI2J5ZGD3YIoNh12N5OeDiJv4JrTxf62sHHpYky6EKaQEPn5JRVt93wOhdFrBOI2Bakd0WVgpvSR167eHp9qxomeiY+9RbhNaPfJQL7+q9wbsHHC/W4mJ9n9MbwsQdFGmd89a4LqhEovWZdm+Kn/vHHHwLF+sg86B6/wbPVeyh7QXB6c6QSoXUCDgcEO7L5eYMMqpOUB3jCSVviM7WGCKQku9n1VCpbnlhQz6ZUtrol2l2uWBOuHcrfsVLoL9AFyoEu9PlJJbwa/mywaKDq5Fe4Bk5Mi5yK7cvVBYU38uq/K6A916TdgAKiLYCsUuG7Y2wiGWb/nqC4VcrTV0iKqfOJupfGXCPFUJHn1DhxoS+gzMjqceHIgbDG2nQOxYLYJ5U+gpGLojBZEM6sGBia+cj6EmXYyvQsUvBCF/7ybqkXvg6nwYaoThvdCdIYHyIIykrN0A2PidHUASZGiR4FGRd6GJO154NE6PUASjwnLMoiXqXi6s5fbeP8TX/U8bFAXSoXqpLufKPfQUfkINNb0wWqlMW2OfmYmkSWpIaQhm7Q7OddrI4nlSxnqOwgEDKkjrJOwSZqlV4WnQkFFTIuMaH/r4V/x2J+b2IksMN6NDrssl804mLfBo5C5lC6dRBom0iDJwGATGz1brqhcEydUuzDBG2mIL4+Lx8SFHrDmSgwlFj9F4zjvJt9q/DAXPd/icrUaLJZ1te5j3Gs4/4DXxY5xhZYIvVWnKX//Fqn6ppMGTRNDurWTvkrEct6HyafCIknQkBziEwz75fW9lrD5l/+g8dHroKBJ8j+AfjDpCpOg4psNGOmxhChk082cgk7nPZwXcJkA+jzgOlABXpdoNlptnAK+aK+2o8n/uhxjnoi0RQlR+OM8ClBKhFiMomiZtGFnIqMzeVxa8CmlzCQQqsqYH+H3Md41iS0RZJga8J+suQDWN4iMDrDTNOREwxowTy0VryJUVP/hIUUyzeEQviKDsm+f088uEutoqCqg4l12S+f5gEi2NiYIEPB08wS1WyFDlizmT+eooI3wFnCh/9ErXV1JoRkShMGgqndtCJGQUl3rTMNuiioYri7B2zCgVSsbG2ueIBd6BHPYJukGDAAw4BLFzgaCV9qSCvS1xM3n/13KcUMOf0TAecwBEALcy3tW2yotstEdY7tRe5jSfdNEsfsH4ImVVKPkcsZOaMfnmavIgxPK3jCppWVnJlPMbIYwwLuoN/uJsXXvLPMHFuiGkG9KIuS1/v2Dl8xXfegfpDmbNU7LEKX+9GvF/yhn8vhCdsanvYE2q7vd7zSvGsoZKaXPqhBsgb0yvkTw5BF/vh/8bOJ8CvM2qlrr1ABQHE4MyxIUPIf0uPsJse12I/h9CVMe/dCFp9HkvCtxQAa9LHmLGlgoMj0M6LP0AVzkKOxC9y/L0WriZT7ND+N19SBIMnJIRrjKptRMgjKPeIQ5DQcFnrD8sScu+qevjoxbPxnScFVQSf3rEZX4gT2jC4VsDVDwlQ0Muygxn3NjyiulYknC1+FprviTqA3g7HH1zgPx7e5hGPIKKkJJHm65JrFYMHiqPLUhriW8r35HJd4gVUclqe41uQhAsUdC2SQGMzgja+f99JYUHfk09YButDi8dpZlNoPQd2ssXcpIsS2cGjP7xwHQ/l7hxt1yTqCjmhDNJ/fV3qqmrfmkcdfwyH+8k3Pv6itU42Eds5th/Kt5T5bDuf96huLUAqwhi+uU0spuu9QwECXucgxvY8VxZEsBQbblhK2dqGsxAhzKZLEpIcWEMob/Z/9fQlXYgL+JC9XRMgXwsG1DKpKYpDz+23xDXAmeGLfrwbsCMTWEhVO660gVPP1pFJdX4pVbj2tABF1Tf+qL+kdnTNYDkn1q8+YTQa/RQAMAOJQujsW4K8RJhxjsYKwlSl3lW9nRG9/zCK1ulX7xl1c7IZbotD49Wpz0WPiSh8klRpOLprQzKwcdbzElDXHmuHVwLZsUgV/qYJ4eoziK8FUbjuvl+3KhoYOuxKmkLQfJQ13P/V1brybMWEhGWqHiXZP1Ei7jHANey9nd7RI++4EQ3bLJn2HoZr6/ZOojxqz2IislgbyBNn6uSrCtQhR4cSoZNzj+c/YtQUtYB2vc/5bdjtM+gIZrdsXJBJf6COhUUcaw4JaK9oVHbEAWjMdD3IHgjJebFAtVAzebwOANrPB0R8Np1lVPVAzAjx8zYyzdXKYT7+U1+evFCP1m8E2/Sl6EXTPNmBHXn30wVmFrB72ADBpVV+X56NkD1PaQTn/YLnhVTw75NeOQ10JriG7chHsbewtA5BfMANrvDIXdIAEe3aNkwFjf0PJamCYHg+sfplFmmQK8oSnckK08Rr70KgRs535nJYjffS0XvoEgBgFJz2opeFXxUjwFg4mc6muEb8fzRXZTA4LyPLaoVk3WeeAO0DX6MTJtpwChDY2VQsOkgB4Noa9UWElWtbdoipUnAdXpwD/YPW/+G6P5hsTGwLhv8lDRbxvHoF/gCiKKMqPKWN8MwstPaFCVJ3LHDAAeT/aHW1LxNfoe3qph529IyuJYfrrcyFS6dt+BNnv5/1DY/y3q6xHNMQP1Iwb/m2CeUCsFPzzmUAkZoTICUJ9uSW+yURBIx8YN7mGWKAH+FhQQTOUMWrSPUV8Inh/AZ9iRu0X5vXor1plYh5v9c87V5US0gC5cuCR+wmkRZVlkuKp2e7olMCKer7PTfuD06O65c2cZC9TYCbJc9Qcm0ynrWctar3HGgzGJegoxhB4icpzoZdvUMGdcp9VCjujVUKlVZk4qldRWizfLTxyHK5JNHh0RuzJWCEoXwNrAJx1ouvALgFAYfGKqUtUV9PNx2fKeMXgi+nKS4UGCxc97j0TK11Vu9KEY6FqTY//kgpk11uki5rbLPVgPEohTrlsGP1czYZsbLhmjXxTsfi/Ykw86Tfl1t1e8w4VkaF5pqOEH+YSSymft3ZP9jJ127rqQzuF7Zfoh7G8nHIiqJOgOnDUKXM1LE43TH51qQS0Gf57MQt6Iyw85GPx5VHlkvlDtK6dZoUAKMFVRVydrTgaFTRxbyMcePOcFw1/NfItxu/RSF8CBq0dOzclTpKXM9KeefXK5mmgI9PbEebGYf5mltViHb8D0RSTpmYTp5a3ik/ryckNBx3zFxl5ZvRQECy0R35NhawzHs0RXTnCiFSATCY+qFqJrDTOFHFIJlLEzdL6e+QllkAPAmV/fojz1iXz98ue8HHRgmiuy88o46hwjDoh/PVPEm62DjzpSYmXUlPqKdERgnVAALDmbWRdRka5bz46KJKoTJWZac6Y5Arj+m9J7XOElbOT6Le3x+pghv6+zDJRsUiT4Ahn/UP/HnvoJadqnLv91hURD+2tUZpKCz5GiklfEhkUJKtbYnIsbw2K9DMY+nLc0pHtAbz/4M1fn1JPycr1WwL7RVOA7vuVoPJfRbzO9AWrznlkz8g9E//OinLUBP716VhlN7uDsU60ieUbzl6f5HM9u/YNKl47AsgfkY7QfqDcYqOSvTYeV6AuRlZTznA5fHa92S0ySZIsbuq15j1Id0oZCsHjB94Bbrhs3bf36+i3MeSEj+/I6EkA+2C4Z+a/VUnRV8Hcb9rhIRefJLOZQmZrClwNkQIrA1DzFbtFcW2p/4reN8wVApkqXLT/i/wTBkNrBBDH9YJAQd1tu3Oep08IrEq1EKqPbqRDBx5A9n8TO/bcuQpgNWYjrIbrhjUlMJGb6wkw4lrCRYlEQ6fNDtQHaWb67pdIWwSuEnX8KfbrEl42hst+pZimkJJHDpvVn3GmYxw8D940hCn/69MzT8fIrk5mBPGf44Vfdf4iq65vo21LHey40Lnz2/gYJKqceU3PW3twdZR/ywiybjR+lR/wed5iRa3vJ/8Me3NXuMBzoJa57D/ewOVfzXYuGZh+JOORbqk0Ln1wn7thzHHZ/tHNUcLHUIzvFhvOHUB6oZ/XBn4m84NptyCDEDROVc48DRcqzAHxQkndnAXW9G7SFwMzWv9thAASZK5rl4CNs268ZlM3TtGuSiSRgGy3cTnZ+VzYFtun7RsE0PTDJJPdMCg84I1jGtJXoFtEXAOSC4udH1N5QFl9M1oVdpFNSFtq7VKgmjqepVjtzHEM5hJAnT1LYLQyPA83LHOp4NHXNQPGtDwU+xgE6pV18BYtzmThJH95XOco5WjX8utgcp9TZ+dZ1vOeAjjmMS27+/R+Er0sX3z7wsb5toEb9MNGSRwmu8ZLFKE1ctTZ2mtKdZLWZcximcmWTsu9v8A5YyIonpXNLNeru5nIbxrghlncCp99zg4fHGoK8LPtl6foOhWZytVI3uNrjiW8NWoHix5oGe+d8OrVm94PM4YBF1Wa66aZG8/uK7JfEs/xdm+ZIBiwAAAAAA==";
       const FB_PACKS = [
         {
-          id: "hero",
-          bg: "radial-gradient(circle at 35% 28%,#8cc4ff,#1f5fbf 80%)",
-          name: "Hero Pack",
-          price: 55,
-          elite: true,
-          f: "hue-rotate(195deg) saturate(1.3)",
-          pool: "Includes elite players.",
-          odds: [
-            [25, 5],
-            [45, 8],
-            [90, 12],
-            [200, 18],
-            [500, 25],
-            [1000, 32],
-          ],
-        },
-        {
           id: "leg",
           bg: "radial-gradient(circle at 35% 28%,#ffe98a,#b8860b 80%)",
           name: "Legend Pack",
-          price: 25,
+          price: 35,
           elite: false,
-          f: "none",
-          pool: "Real professional players, no elite tier.",
+          pool: "The biggest names in football.",
           odds: [
-            [10, 5],
-            [20, 8],
-            [40, 12],
-            [80, 18],
-            [200, 25],
-            [500, 32],
+            [20, 12],
+            [35, 23],
+            [100, 34],
+            [300, 21.5],
+            [1000, 9],
+            [10000, 0.5],
+          ],
+        },
+        {
+          id: "hero",
+          bg: "radial-gradient(circle at 35% 28%,#8cc4ff,#1f5fbf 80%)",
+          name: "Hero Pack",
+          price: 25,
+          elite: true,
+          pool: "Football heroes. Includes elite players.",
+          odds: [
+            [15, 12],
+            [25, 24],
+            [60, 34],
+            [200, 20.5],
+            [800, 9],
+            [5000, 0.5],
+          ],
+        },
+        {
+          id: "icon",
+          bg: "radial-gradient(circle at 35% 28%,#cfa9ff,#5a2fb0 80%)",
+          name: "Icon Pack",
+          price: 15,
+          elite: true,
+          pool: "Today’s biggest stars.",
+          odds: [
+            [10, 12],
+            [15, 24],
+            [40, 34],
+            [120, 20.5],
+            [500, 9],
+            [2500, 0.5],
           ],
         },
         {
@@ -2650,32 +2767,14 @@
           name: "Standard Pack",
           price: 5,
           elite: false,
-          f: "grayscale(1) contrast(1.05)",
           pool: "Real professional players, no elite tier.",
           odds: [
-            [2, 5],
-            [4, 8],
-            [8, 12],
-            [20, 18],
-            [50, 25],
-            [100, 32],
-          ],
-        },
-        {
-          id: "icon",
-          bg: "radial-gradient(circle at 35% 28%,#cfa9ff,#5a2fb0 80%)",
-          name: "Icon Pack",
-          price: 100,
-          elite: true,
-          f: "hue-rotate(290deg) saturate(1.4)",
-          pool: "Includes the biggest names in the game.",
-          odds: [
-            [50, 5],
-            [85, 8],
-            [150, 12],
-            [300, 18],
-            [800, 25],
-            [2500, 32],
+            [1, 15],
+            [5, 26],
+            [20, 32],
+            [50, 18],
+            [100, 7.5],
+            [500, 1.5],
           ],
         },
       ];
@@ -2689,7 +2788,7 @@
         earned: 0,
         tab: "packs",
         sec: "fb",
-        sel: 1,
+        sel: 0,
         refBy: null,
         refMsg: false,
         pending: 0,
@@ -2717,6 +2816,10 @@
       };
       Tg.ready();
       Tg.expand();
+      const START =
+        (Tg.initDataUnsafe && Tg.initDataUnsafe.start_param) ||
+        new URLSearchParams(location.search).get("ref") ||
+        "";
       const $ = (id) => document.getElementById(id),
         m = (n) =>
           "$" +
@@ -2852,8 +2955,10 @@
       }
       function mark() {
         const p = PACKS[S.sel],
-          mn = p.odds[0][0],
-          mx = p.odds[p.odds.length - 1][0];
+          pr = p.odds.filter((o) => !o[2]),
+          mn = pr[0][0],
+          mx = p.odds[p.odds.length - 1][0],
+          wc = +pr.reduce((a, o) => a + o[1], 0).toFixed(2);
         document
           .querySelectorAll(".cat")
           .forEach((e, i) => e.classList.toggle("on", i === S.sel));
@@ -2867,7 +2972,7 @@
       function oddsSheet() {
         const p = PACKS[S.sel];
         sheet(
-          `<h3>Odds · ${p.name}</h3><p class="d">${p.pool} Chance of each card value per pack. Average value: ${m(ev(p).toFixed(2))}. Sell any card back for ${Math.round(CFG.buyback * 100)}% of its value.</p><p class="d">Players: ${PL[p.id].map((x) => x[0]).join(", ")}.</p><table><tr><th>Card value</th><th>Chance</th></tr>${p.odds.map(([v, o]) => `<tr><td>${m(v)}<div class="bar"><i style="width:${o}%"></i></div></td><td>${o}%</td></tr>`).join("")}</table>`,
+          `<h3>Odds · ${p.name}</h3><p class="d">${p.pool} Chance of each outcome per pack. Average value: ${m(ev(p).toFixed(2))}. Sell any card back for ${Math.round(CFG.buyback * 100)}% of its value.</p><p class="d">Players: ${PL[p.id].map((x) => x[0]).join(", ")}.</p><table><tr><th>Card value</th><th>Chance</th></tr>${p.odds.map(([v, o, c]) => `<tr><td>${m(v)}${c ? " · common card" : ""}<div class="bar"><i style="width:${o}%"></i></div></td><td>${o}%</td></tr>`).join("")}</table>`,
         );
       }
 
@@ -3250,7 +3355,7 @@
  <label class="lbl" for="w-tok">FROM</label><select class="field" id="w-tok" onchange="wd.tok=this.value;upWd()"><option value="usdc" ${wd.tok === "usdc" ? "selected" : ""}>USDC · Solana</option><option value="usdt" ${wd.tok === "usdt" ? "selected" : ""}>USDT · Solana</option></select>
  <label class="lbl" for="w-amt">AMOUNT</label><input class="field" id="w-amt" inputmode="decimal" placeholder="0.00" value="${bal > 0 ? bal.toFixed(2) : ""}" oninput="upWd()">
  <label class="lbl" for="w-to">YOUR WHOOP WALLET ADDRESS</label><input class="field" id="w-to" placeholder="Paste your Whoop address" oninput="upWd()">
- <div class="sum"><div><span>Amount</span><span id="s-a">$0.00</span></div><div><span>Network fee (${CFG.feePct * 100}%, min ${m(CFG.netFee)})</span><span id="s-f">$0.00</span></div><div><span>Arrives</span><span>Within ${CFG.holdHours} hours</span></div><div><span>You receive</span><span id="s-r">$0.00</span></div></div>
+ <div class="sum"><div><span>Amount</span><span id="s-a">$0.00</span></div><div><span>Withdrawal fee</span><span id="s-f">$0.00</span></div><div><span>Arrives</span><span>Within ${CFG.holdHours} hours</span></div><div><span>You receive</span><span id="s-r">$0.00</span></div></div>
  <p class="warn" id="w-err"></p><button class="cta" id="w-go" onclick="doWd()">Confirm withdrawal</button>`);
         upWd();
       }
@@ -3295,7 +3400,7 @@
  <button class="cta" onclick="cp(CFG.address)">Copy address</button>
  <div class="wait"><i></i>Waiting for your deposit. It is credited automatically, no need to refresh.</div>
  <p class="warn" style="margin-top:12px">Only send ${dep.tok} on the Solana network. Anything else will be lost.</p>
- <button class="sec" onclick="simDep()">Simulate a $10 deposit (demo)</button>`);
+ ${CFG.apiBase ? "" : `<button class="sec" onclick="simDep()">Simulate a $10 deposit (demo)</button>`}`);
       }
       let _addOpen = false,
         _last = null;
@@ -3342,6 +3447,10 @@
         if (!CFG.apiBase || document.hidden) return;
         try {
           applyBalance(await api("/balance"));
+          if (S.tab === "rewards") {
+            applyProfile(await api("/rewards"));
+            draw();
+          }
         } catch (e) {}
       }
       function onDeposit(d) {
@@ -3350,7 +3459,7 @@
           sheet(`<div class="okv"><div class="chk">✓</div><h3>Deposit received</h3><p class="d">${m(d)} was added to your pack credits instantly.</p>
   <div class="sum"><div><span>Received</span><span>${m(d)}</span></div><div><span>Pack credits balance</span><span>${m(S.credits)}</span></div></div>
   <button class="cta" onclick="closeSheet();go('packs')">Open a pack</button><button class="sec" style="margin-top:10px" onclick="closeSheet()">Done</button></div>`);
-        } else toast("+" + m(d) + " deposit received");
+        } else toast("+" + m(d) + " added to your pack credits");
         draw();
       }
       function simDep() {
@@ -3395,26 +3504,101 @@
  <div class="rb wbar"><div><small class="cap">YOUR WINNINGS</small><b>${m(S.usdc)} <em>USDC</em></b></div><button class="wbtn" onclick="openWd()">Withdraw USDC</button></div>
  <div class="rb"><small class="cap">HAVE A REFERRAL CODE?</small>
   <div class="rcode"><input class="field" id="rc" placeholder="Enter code" ${S.refBy ? "disabled" : ""} oninput="$('rdone').disabled=!this.value.trim()"><button class="done" id="rdone" ${S.refBy ? "disabled" : "disabled"} onclick="redeem()">Done</button></div>
-  ${S.refMsg ? `<p class="okm">You got ${m(CFG.refBonus)} in Pack Credits!</p>` : ""}</div>
- <button class="sec" onclick="simRef()">Simulate a referral (demo)</button>`;
+  ${S.refMsg ? `<p class="okm">You got ${m(CFG.refBonus)} in Pack Credits!</p>` : ""}</div>`;
       }
-      function redeem() {
+      const today = () =>
+        new Date().toLocaleDateString("en", { month: "short", day: "numeric" });
+      const okCode = (v) =>
+        /^[0-9a-f]{6,16}$/i.test(v) &&
+        v.toLowerCase() !== CFG.code.toLowerCase();
+      async function redeem() {
         const v = $("rc").value.trim();
-        if (!v || v === CFG.code || S.refBy) {
-          toast("Enter a valid code");
+        if (S.refBy || !okCode(v)) {
+          toast(S.refBy ? "You already used a code" : "That code didn’t work");
           return;
         }
-        /* TODO: server checks the code, pays both users once */
-        S.refBy = {
-          name: "@Friend" + v.slice(0, 4),
-          date: new Date().toLocaleDateString("en", {
-            month: "short",
-            day: "numeric",
-          }),
-        };
+        if (CFG.apiBase) {
+          try {
+            applyProfile(await api("/redeem", { code: v }));
+            S.refMsg = true;
+            draw();
+          } catch (e) {
+            toast("That code didn’t work");
+          }
+          return;
+        }
+        /* demo only: the server checks the code and pays both users */
+        S.refBy = { name: "@friend", date: today() };
         S.credits += CFG.refBonus;
         S.refMsg = true;
         draw();
+      }
+      function applyProfile(j) {
+        if (j.code) CFG.code = j.code;
+        S.invited = j.invited;
+        S.earned = j.earned;
+        S.pending = j.pending || 0;
+        S.refBy = j.referredBy
+          ? {
+              name: j.referredBy.name,
+              date: new Date(j.referredBy.date).toLocaleDateString("en", {
+                month: "short",
+                day: "numeric",
+              }),
+            }
+          : null;
+        if ("credits" in j) {
+          S.credits = j.credits;
+          S.usdc = j.usdc;
+          S.usdt = j.usdt;
+          S.sendWallet = j.wallet || null;
+          _last = j.credits;
+        }
+        S.welcomed = true;
+      }
+      function showWelcome() {
+        S.welcomed = false;
+        const o = document.createElement("div");
+        o.id = "wl";
+        const mkc = (id, i) =>
+          cardHTML(
+            Object.assign(
+              base(
+                PL[id][i],
+                FB_PACKS.find((x) => x.id === id),
+              ),
+              { v: 0 },
+            ),
+          );
+        o.innerHTML = `<div class="wl-logo"><img src="${LOGO}" alt="">phygitals</div>
+ <div class="fan"><div class="fc l">${mkc("hero", 0)}</div><div class="fc r">${mkc("icon", 1)}</div><div class="fc c">${mkc("leg", 0)}</div></div>
+ <h1>New legends every day.</h1>
+ <p class="wl-sub">Refer people to <u>earn dollars</u> and <u>open packs</u>.</p>
+ ${START ? `<div class="wl-ref">Invited by a friend. You both get ${m(CFG.refBonus)} in pack credits.</div>` : ""}
+ <button class="cta" onclick="continueTg()"><span class="shr">${ICON.send}Continue using Telegram</span></button>
+ <p class="wl-fine">Must be 18+ to continue. By continuing you agree to our <a href="#">Terms of Service</a> and <a href="#">Privacy Policy</a>.</p>`;
+        document.body.appendChild(o);
+      }
+      async function continueTg() {
+        try {
+          if (CFG.apiBase) applyProfile(await api("/signup", { ref: START }));
+          else if (START && okCode(START)) {
+            S.refBy = { name: "@friend", date: today() };
+            S.credits += CFG.refBonus;
+            S.refMsg = true;
+          }
+        } catch (e) {
+          toast("Could not sign in. Try again");
+          return;
+        }
+        S.welcomed = true;
+        const w = $("wl");
+        if (w) {
+          w.classList.add("out");
+          setTimeout(() => w.remove(), 300);
+        }
+        draw();
+        if (S.refBy) toast("You got " + m(CFG.refBonus) + " in Pack Credits!");
       }
       function cp(t) {
         navigator.clipboard && navigator.clipboard.writeText(t).catch(() => {});
@@ -3429,13 +3613,6 @@
               "Open football packs with me. We both get $1 credit.",
             ),
         );
-      }
-      function simRef() {
-        S.invited++;
-        S.earned += CFG.refBonus;
-        S.credits += CFG.refBonus;
-        draw();
-        toast("+" + m(CFG.refBonus) + " credit");
       }
       let _tc = null;
       document.addEventListener("pointermove", (e) => {
@@ -3471,6 +3648,14 @@
         setInterval(poll, 3000);
       }
       draw();
+      CFG.apiBase
+        ? api("/me")
+            .then((j) => {
+              applyProfile(j);
+              draw();
+            })
+            .catch(showWelcome)
+        : showWelcome();
     </script>
   </body>
 </html>
