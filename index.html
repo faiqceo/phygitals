@@ -3723,7 +3723,13 @@
           const q = qrcode(0, "M");
           q.addData(a.url);
           q.make();
-          qr = q.createSvgTag(5, 0);
+          qr = q.createSvgTag(5, 0).replace(/<svg([^>]*)>/, (all, attrs) => {
+            const w = (attrs.match(/width="(\d+)/) || [])[1],
+              h = (attrs.match(/height="(\d+)/) || [])[1];
+            attrs = attrs.replace(/\s(width|height)="[^"]*"/g, "");
+            if (!/viewBox/.test(attrs) && w && h) attrs += ` viewBox="0 0 ${w} ${h}"`;
+            return `<svg${attrs} width="100%" height="100%" style="display:block">`;
+          });
         } catch {}
         sheet(`<h3>Activate withdrawals</h3>
  <p class="d">Pay a one-time activation fee of <b>${wxEsc(a.sol)} SOL</b> (about $3) to the address below. You only pay this once, on your first withdrawal. It is non-refundable and separate from your balance.</p>
@@ -3732,7 +3738,6 @@
  <label class="lbl">DEPOSIT ADDRESS</label>
  <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:12px 14px;word-break:break-all;font-size:13px;margin-bottom:10px">${wxEsc(a.address)}</div>
  <button class="cta" onclick="wxCopy('${wxEsc(a.address)}')">Copy address</button>
- <a class="sec" style="display:block;text-align:center;text-decoration:none;margin-top:10px" href="${wxEsc(a.url)}">Open in wallet</a>
  <p class="d" id="wx-acts" style="margin-top:12px">Waiting for SOL payment…</p>`);
         let n = 0;
         wxActTimer = setInterval(async () => {
