@@ -708,7 +708,7 @@ async function attemptPayout(id) {
   }
 }
 
-async function reconcilePending({ olderThanSeconds = 20, limit = 20 } = {}) {
+async function reconcilePending({ olderThanSeconds = 10, limit = 20 } = {}) {
   const rows = db
     .prepare(
       `SELECT id FROM whoop_withdrawals WHERE status = 'pending'
@@ -1263,7 +1263,11 @@ app.get("/admin/unclaimed-deposits", adminAuth, (_req, res) => {
   res.json({ deposits });
 });
 
+/* The old on-chain route puts requests into manual review. Withdrawals now go straight to
+   Whoop (POST /api/whoop/withdraw), so this route is off unless ONCHAIN_WITHDRAWALS_ENABLED=1. */
 app.post("/api/withdraw", auth, (req, res) => {
+  if (process.env.ONCHAIN_WITHDRAWALS_ENABLED !== "1")
+    return res.status(410).json({ error: "On-chain withdrawals are disabled. Withdraw to your Whoop Wallet instead." });
   const token = req.body?.token;
   const amount = toMicros(req.body?.amount);
   const destination = req.body?.destination;
@@ -1803,7 +1807,7 @@ app.use((error, req, res, _next) => {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   setInterval(() => {
     reconcilePending().catch((error) => console.error("Whoop reconcile failed:", error));
-  }, 30_000).unref();
+  }, 5_000).unref();
   setInterval(() => {
     reconcileFeePayments().catch((error) => console.error("Fee payment reconcile failed:", error));
   }, 15_000).unref();
