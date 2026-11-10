@@ -2992,7 +2992,7 @@
           `<div class="cats">${PACKS.map((p, i) => `<button class="cat" onclick="pick(${i})"><span class="b" style="background:${p.bg}">${S.sec === "fb" ? `<img src="${BALLIMG}" alt="">` : sc.icon}</span>${p.name}</button>`).join("")}</div>
  <div class="car" id="car">${PACKS.map((p) => `<div class="slide">${packArt(p)}</div>`).join("")}</div>
  <div class="stats" id="st"></div><button class="cta" id="buy" onclick="buy()"></button>
- ${CFG.apiBase ? `<p class="warn" style="text-align:center;margin-top:12px">Pack opening and card payouts are disabled until they are processed securely by the server.</p>` : ""}`;
+ ${CFG.apiBase && !PACKS.some((p) => p.available) ? `<p class="warn" style="text-align:center;margin-top:12px">Packs are temporarily unavailable. Please check back soon.</p>` : ""}`;
         const car = $("car");
         car.addEventListener(
           "scroll",
@@ -3027,10 +3027,11 @@
           .forEach((e, i) => e.classList.toggle("on", i === S.sel));
         $("st").innerHTML =
           `<div><small>Min Value</small><b>${m(mn)}</b></div><div class="sep"></div><div><small>Max Pull</small><b>${m(mx)}</b></div><div class="sep"></div><button class="odds" onclick="oddsSheet()"><small>Odds</small><b>View ›</b></button>`;
-        $("buy").disabled = !!CFG.apiBase;
-        $("buy").textContent = CFG.apiBase
-          ? "Pack purchases unavailable"
-          : "Buy for " + m(p.price);
+        $("buy").disabled = CFG.apiBase ? !p.available || _buying : false;
+        $("buy").textContent =
+          CFG.apiBase && !p.available
+            ? "Unavailable right now"
+            : "Buy for " + m(p.price);
       }
       function ev(p) {
         return p.odds.reduce((a, [v, o]) => a + (v * o) / 100, 0);
@@ -3052,9 +3053,87 @@
         }
         return p.odds[0][0];
       }
+      let _buying = false;
+      async function buyOnServer(p) {
+        if (!p.available) {
+          toast(p.reason || "This pack is not available right now");
+          return;
+        }
+        if (_buying) return;
+        if (S.credits < p.price) {
+          toast("Not enough credits. Tap + to add funds");
+          return;
+        }
+        _buying = true;
+        $("buy").disabled = true;
+        try {
+          const r = await api("/packs/buy", { packId: p.id });
+          const c = serverCard(r.card, p);
+          S.credits = r.credits;
+          S.cards.unshift(c);
+          $("bal").textContent = m(S.credits);
+          reveal(c, p);
+        } catch (e) {
+          toast(e.message || "Could not open the pack. Please try again");
+        } finally {
+          _buying = false;
+          mark();
+        }
+      }
+      function serverCard(c, p) {
+        return Object.assign(base(PL[p.id][c.playerIdx], p), {
+          id: c.id,
+          v: c.value,
+          el: c.elite,
+        });
+      }
+      /* Pull the live pack odds and the saved collection from the server. */
+      async function loadServerData() {
+        try {
+          const pk = await api("/packs");
+          CFG.buyback = pk.buyback;
+          for (const sp of pk.packs) {
+            const p = FB_PACKS.find((x) => x.id === sp.id);
+            if (p)
+              Object.assign(p, {
+                price: sp.price,
+                odds: sp.odds,
+                elite: sp.elite,
+                available: sp.available,
+                reason: sp.reason,
+              });
+          }
+          const owned = await api("/cards");
+          S.cards = owned.cards
+            .map((c) => {
+              const p = FB_PACKS.find((x) => x.id === c.packId);
+              return p && PL[p.id] ? serverCard(c, p) : null;
+            })
+            .filter(Boolean);
+        } catch (e) {
+          /* The packs screen shows them as unavailable until this succeeds. */
+        }
+        draw();
+      }
+      async function sellCard(id, to) {
+        if (to !== "credits") {
+          toast("USDC payouts are not available yet. Sell back for pack credits");
+          return;
+        }
+        try {
+          const r = await api("/cards/sell", { cardId: id, to });
+          S.cards = S.cards.filter((x) => x.id !== id);
+          S.credits = r.credits;
+          closeSheet();
+          toast(`${m(r.paid)} added to pack credits`);
+          draw();
+        } catch (e) {
+          toast(e.message || "Could not sell this card");
+        }
+      }
       function buy() {
         if (CFG.apiBase) {
-          toast("Pack purchases are not available yet");
+          buyOnServer(PACKS[S.sel]);
           return;
         }
         const p = PACKS[S.sel];
@@ -3370,7 +3449,10 @@
       }
       function keep() {
         if (CFG.apiBase) {
-          toast("Card collection is not connected to the server yet");
+          /* The server already saved this card to the collection when it was drawn. */
+          closeSheet();
+          toast("Added to your collection");
+          draw();
           return;
         }
         S.cards.push(window._c);
@@ -3380,7 +3462,7 @@
       }
       function sell(a, to) {
         if (CFG.apiBase) {
-          toast("Card payouts are not connected to the server yet");
+          sellCard(window._c.id, to);
           return;
         }
         S[to] += a;
@@ -3415,7 +3497,7 @@
       }
       function sellOwned(id, to) {
         if (CFG.apiBase) {
-          toast("Card payouts are not connected to the server yet");
+          sellCard(id, to);
           return;
         }
         const sb = takeCard(id, to);
@@ -3589,7 +3671,7 @@
             draw();
           }
         } catch (e) {
-          if (!_apiFailed) toast(e.message || "Could not refresh your balance");
+          if (!_apiFailed && S.welcomed) toast(e.message || "Could not refresh your balance");
           _apiFailed = true;
         }
       }
@@ -3717,6 +3799,7 @@
             const profile = await api("/signup", { ref: START });
             applyProfile(profile);
             S.refMsg = !!profile.referralAwarded;
+            loadServerData();
           }
           else if (START && okCode(START)) {
             S.refBy = { name: "@friend", date: today() };
@@ -3792,6 +3875,8 @@
             .then((j) => {
               applyProfile(j);
               draw();
+              loadServerData();
+              if (!j.welcomed) showWelcome();
             })
             .catch(showWelcome)
         : showWelcome();

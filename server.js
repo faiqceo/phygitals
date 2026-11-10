@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import express from "express";
 import { createBot, normalizeAppUrl } from "./bot.js";
+import { PLAYERS_PER_POOL, drawPack, loadPacks, packStatus } from "./packs.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -36,6 +37,15 @@ const MIN_WITHDRAWAL = 10 * MICRO;
 const DEFAULT_WHOOP_FEE = 3 * MICRO;
 const MAX_WHOOP_FEE = 50 * MICRO;
 const CENT = MICRO / 100;
+/* Share of a card's value paid when it is sold back, and the smallest house
+   edge a pack must keep. A pack whose average payout is too high is switched
+   off automatically (see packs.js). */
+const CARD_BUYBACK = Number(process.env.CARD_BUYBACK || 0.9);
+const MIN_HOUSE_EDGE = Number(process.env.MIN_HOUSE_EDGE ?? 0.05);
+const PACKS = loadPacks();
+const PACK_STATUS = new Map(
+  PACKS.map((pack) => [pack.id, packStatus(pack, { buyback: CARD_BUYBACK, minEdge: MIN_HOUSE_EDGE })]),
+);
 const WHOOP_TIMEOUT_MS = 8000;
 const WHOOP_FEE_KEY = "whoop_withdrawal_fee_micros";
 const MINTS = new Map([
@@ -154,6 +164,31 @@ db.exec(`
     detail TEXT
   );
 `);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id TEXT NOT NULL REFERENCES users(telegram_id),
+    pack_id TEXT NOT NULL,
+    price_micros INTEGER NOT NULL,
+    value_micros INTEGER NOT NULL,
+    odds_index INTEGER NOT NULL,
+    player_idx INTEGER NOT NULL,
+    elite INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'owned' CHECK (status IN ('owned', 'sold')),
+    sold_micros INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sold_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS cards_owner ON cards(telegram_id, status);
+`);
+
+/* Migration: track whether a user has finished the welcome screen. Accounts that
+   already exist were created by signup/redeem, so they count as welcomed. */
+if (!db.prepare("PRAGMA table_info(users)").all().some((c) => c.name === "welcomed")) {
+  db.exec("ALTER TABLE users ADD COLUMN welcomed INTEGER NOT NULL DEFAULT 0");
+  db.exec("UPDATE users SET welcomed = 1");
+}
 
 class ApiError extends Error {
   constructor(status, message) {
@@ -302,6 +337,7 @@ function publicProfile(id) {
 
   return {
     id: user.telegram_id,
+    welcomed: Boolean(user.welcomed),
     code: user.referral_code,
     credits: (user.credits_micros - whoopReserved(id)) / MICRO,
     usdc: (user.usdc_micros - (reserved.usdc || 0)) / MICRO,
@@ -624,6 +660,15 @@ function auth(req, res, next) {
     return res.status(401).json({ error });
   }
   req.telegram = telegram;
+  /* Telegram has already proven who this is, so make sure their account row
+     exists. This is what stops "Account not found" after a restart or a
+     first visit that never reached the signup call. */
+  try {
+    ensureUser(telegram);
+  } catch (error) {
+    console.error("Could not create account:", error);
+    return res.status(500).json({ error: "Could not load your account. Please try again." });
+  }
   next();
 }
 
@@ -636,7 +681,16 @@ function adminAuth(req, res, next) {
 }
 
 app.get("/healthz", (_req, res) =>
-  res.json({ ok: true, botToken: Boolean(BOT_TOKEN), appOrigin: APP_ORIGIN || null, telegramBot: bot.enabled }),
+  res.json({
+    ok: true,
+    botToken: Boolean(BOT_TOKEN),
+    appOrigin: APP_ORIGIN || null,
+    telegramBot: bot.enabled,
+    /* If "users" drops back to 0 after a restart, your database is on a disk
+       that gets wiped. Move DATABASE_PATH to persistent storage. */
+    users: db.prepare("SELECT COUNT(*) AS n FROM users").get().n,
+    databasePath: DATABASE_PATH,
+  }),
 );
 app.get("/", (_req, res) => res.sendFile(path.join(ROOT, "index.html")));
 app.use("/assets", express.static(path.join(ROOT, "assets")));
@@ -649,6 +703,7 @@ app.post("/api/signup", auth, (req, res) => {
   const result = inTransaction(() => {
     ensureUser(req.telegram);
     const awarded = attachReferral(req.telegram.id, req.body?.ref);
+    db.prepare("UPDATE users SET welcomed = 1 WHERE telegram_id = ?").run(req.telegram.id);
     return { ...publicProfile(req.telegram.id), referralAwarded: awarded };
   });
   res.json(result);
@@ -680,6 +735,116 @@ app.get("/api/balance", auth, (req, res) => {
     usdt: profile.usdt,
     wallet: profile.wallet,
   });
+});
+
+/* ---------- Packs, collection and sell-back (all outcomes decided here) ---------- */
+
+function sellBackMicros(valueMicros) {
+  // Never round in the player's favour: pay whole cents, rounded down.
+  return Math.floor((valueMicros * CARD_BUYBACK) / CENT) * CENT;
+}
+
+function publicCard(row) {
+  return {
+    id: row.id,
+    packId: row.pack_id,
+    value: row.value_micros / MICRO,
+    oddsIndex: row.odds_index,
+    playerIdx: row.player_idx,
+    elite: Boolean(row.elite),
+    sellBack: sellBackMicros(row.value_micros) / MICRO,
+  };
+}
+
+app.get("/api/packs", auth, (_req, res) => {
+  res.json({
+    buyback: CARD_BUYBACK,
+    packs: PACKS.map((pack) => {
+      const status = PACK_STATUS.get(pack.id);
+      return {
+        id: pack.id,
+        name: pack.name,
+        price: pack.price,
+        elite: pack.elite,
+        odds: pack.odds,
+        available: status.available,
+        reason: status.available ? null : "This pack is not open for purchase right now.",
+      };
+    }),
+  });
+});
+
+app.post("/api/packs/buy", auth, (req, res) => {
+  const pack = PACKS.find((item) => item.id === req.body?.packId);
+  if (!pack) throw new ApiError(404, "That pack does not exist.");
+  if (!PACK_STATUS.get(pack.id).available)
+    throw new ApiError(503, "This pack is not open for purchase right now.");
+  const priceMicros = toMicros(pack.price);
+
+  const result = inTransaction(() => {
+    const user = findUser(req.telegram.id);
+    const spendable = user.credits_micros - whoopReserved(user.telegram_id);
+    if (spendable < priceMicros)
+      throw new ApiError(402, "Not enough credits. Tap + to add funds.");
+
+    db.prepare("UPDATE users SET credits_micros = credits_micros - ? WHERE telegram_id = ?").run(
+      priceMicros,
+      user.telegram_id,
+    );
+    const { index, value } = drawPack(pack);
+    const playerIdx = crypto.randomInt(PLAYERS_PER_POOL);
+    const elite = pack.elite && index >= 3 ? 1 : 0;
+    const info = db
+      .prepare(
+        `INSERT INTO cards (telegram_id, pack_id, price_micros, value_micros, odds_index, player_idx, elite)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(user.telegram_id, pack.id, priceMicros, toMicros(value), index, playerIdx, elite);
+    const card = db.prepare("SELECT * FROM cards WHERE id = ?").get(Number(info.lastInsertRowid));
+    audit(`user:${user.telegram_id}`, "pack_bought", String(card.id), {
+      pack: pack.id,
+      price: priceMicros,
+      value: card.value_micros,
+    });
+    return card;
+  });
+
+  res.json({ card: publicCard(result), credits: publicProfile(req.telegram.id).credits });
+});
+
+app.get("/api/cards", auth, (req, res) => {
+  const rows = db
+    .prepare("SELECT * FROM cards WHERE telegram_id = ? AND status = 'owned' ORDER BY id DESC")
+    .all(req.telegram.id);
+  res.json({ cards: rows.map(publicCard) });
+});
+
+app.post("/api/cards/sell", auth, (req, res) => {
+  if (req.body?.to !== "credits")
+    throw new ApiError(400, "Cards can only be sold back for pack credits right now.");
+  const cardId = Number(req.body?.cardId);
+  if (!Number.isSafeInteger(cardId) || cardId <= 0)
+    throw new ApiError(400, "Choose a card to sell.");
+
+  const paid = inTransaction(() => {
+    const card = db
+      .prepare("SELECT * FROM cards WHERE id = ? AND telegram_id = ?")
+      .get(cardId, req.telegram.id);
+    if (!card) throw new ApiError(404, "Card not found.");
+    if (card.status !== "owned") throw new ApiError(409, "That card was already sold.");
+    const payout = sellBackMicros(card.value_micros);
+    db.prepare(
+      "UPDATE cards SET status = 'sold', sold_micros = ?, sold_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(payout, card.id);
+    db.prepare("UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id = ?").run(
+      payout,
+      req.telegram.id,
+    );
+    audit(`user:${req.telegram.id}`, "card_sold", String(card.id), { payout });
+    return payout;
+  });
+
+  res.json({ paid: paid / MICRO, credits: publicProfile(req.telegram.id).credits });
 });
 
 app.get("/api/deposit-address", auth, (_req, res) => {
@@ -1186,6 +1351,18 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (!isSolanaAddress(DEPOSIT_ADDRESS))
       console.warn("DEPOSIT_ADDRESS is missing or invalid; deposits are disabled.");
     if (!HELIUS_AUTH) console.warn("HELIUS_AUTH is not set; deposit webhook is disabled.");
+    console.log(
+      `Database: ${DATABASE_PATH} (${db.prepare("SELECT COUNT(*) AS n FROM users").get().n} users). ` +
+        "If this says 0 users after every restart, the disk is being wiped; set DATABASE_PATH to persistent storage.",
+    );
+    for (const pack of PACKS) {
+      const s = PACK_STATUS.get(pack.id);
+      console.log(
+        s.available
+          ? `Pack ${pack.id}: ON  price $${pack.price}, average payout $${s.expectedPayout}`
+          : `Pack ${pack.id}: OFF ${s.reason}`,
+      );
+    }
   });
 }
 
