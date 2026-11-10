@@ -2559,6 +2559,16 @@
         font-size: 13px;
         padding: 10px 16px;
       }
+      .toast {
+        z-index: 100;
+      }
+      #wl .wl-err {
+        color: #ff6b6b;
+        font-size: 13px;
+        text-align: center;
+        margin: 10px 0 0;
+        min-height: 18px;
+      }
 
       #wl {
         position: fixed;
@@ -3653,10 +3663,13 @@
  <p class="wl-sub">Refer people to <u>earn dollars</u> and <u>open packs</u>.</p>
  ${START ? `<div class="wl-ref">Invited by a friend. You both get ${m(CFG.refBonus)} in pack credits.</div>` : ""}
  <button class="cta" onclick="continueTg()"><span class="shr">${ICON.send}Continue using Telegram</span></button>
+ <p class="wl-err" id="wl-err"></p>
  <p class="wl-fine">Must be 18+ to continue. By continuing you agree to our <a href="#">Terms of Service</a> and <a href="#">Privacy Policy</a>.</p>`;
         document.body.appendChild(o);
       }
       async function continueTg() {
+        const box = $("wl-err");
+        if (box) box.textContent = "";
         try {
           if (CFG.apiBase) {
             const profile = await api("/signup", { ref: START });
@@ -3669,7 +3682,10 @@
             S.refMsg = true;
           }
         } catch (e) {
-          toast(e.message || "Could not sign in. Try again");
+          const msg = e.message || "Could not sign in. Try again";
+          const box = $("wl-err");
+          if (box) box.textContent = msg;
+          toast(msg);
           return;
         }
         S.welcomed = true;

@@ -12,7 +12,7 @@ const PORT = Number(process.env.PORT || 3000);
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
 const HELIUS_AUTH = process.env.HELIUS_AUTH || "";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
-const APP_ORIGIN = process.env.APP_ORIGIN || "";
+const APP_ORIGIN = (process.env.APP_ORIGIN || "").trim().replace(/\/+$/, "");
 const DEPOSIT_ADDRESS = process.env.DEPOSIT_ADDRESS || "";
 /* Public HTTPS address of this server; Telegram needs it for the webhook and the Mini App button.
    Falls back to APP_ORIGIN (if it is an https URL) and to the URLs common hosts provide. */
@@ -591,8 +591,10 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   const origin = req.get("origin");
-  if (origin && APP_ORIGIN && APP_ORIGIN !== "*" && origin !== APP_ORIGIN)
-    return res.sendStatus(403);
+  if (origin && APP_ORIGIN && APP_ORIGIN !== "*" && origin !== APP_ORIGIN) {
+    console.warn(`Origin rejected: request came from "${origin}" but APP_ORIGIN is "${APP_ORIGIN}". They must match exactly.`);
+    return res.status(403).json({ error: "Server setup problem: APP_ORIGIN does not match this site's address." });
+  }
   if (origin && APP_ORIGIN === "*") res.set("Access-Control-Allow-Origin", "*");
   else if (origin && origin === APP_ORIGIN)
     res.set("Access-Control-Allow-Origin", APP_ORIGIN);
@@ -603,8 +605,24 @@ app.use((req, res, next) => {
 });
 
 function auth(req, res, next) {
-  const telegram = verifyInitData(req.get("X-Telegram-Init-Data"));
-  if (!telegram) return res.status(401).json({ error: "Valid Telegram sign-in required." });
+  const raw = req.get("X-Telegram-Init-Data");
+  const telegram = verifyInitData(raw);
+  if (!telegram) {
+    let reason;
+    let error;
+    if (!BOT_TOKEN) {
+      reason = "BOT_TOKEN is not set on the server";
+      error = "Server setup problem: BOT_TOKEN is not set.";
+    } else if (!raw) {
+      reason = "no Telegram initData sent (app not opened from inside Telegram)";
+      error = "Please open Phygitals from inside Telegram.";
+    } else {
+      reason = "initData failed verification (BOT_TOKEN is not the token of the bot that opened the app, or the data is older than 24h)";
+      error = "Telegram sign-in could not be verified. Close and reopen the app from the bot.";
+    }
+    console.warn(`Auth rejected on ${req.method} ${req.path}: ${reason}`);
+    return res.status(401).json({ error });
+  }
   req.telegram = telegram;
   next();
 }
@@ -1156,6 +1174,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   app.listen(PORT, () => {
     console.log(`Phygitals server listening on port ${PORT}`);
     if (!BOT_TOKEN) console.warn("BOT_TOKEN is not set; Telegram API requests will be rejected.");
+    if (/REPLACE/i.test(BOT_TOKEN)) console.warn("BOT_TOKEN still contains the REPLACE_WITH placeholder; sign-in will fail.");
+    if (/REPLACE/i.test(APP_ORIGIN)) console.warn("APP_ORIGIN still contains the REPLACE_WITH placeholder; sign-in will fail.");
     if (!bot.enabled)
       console.warn("APP_URL (public https URL) or BOT_TOKEN is missing; the Telegram bot (/start) is disabled.");
     else
