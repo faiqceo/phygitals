@@ -1253,6 +1253,38 @@
         min-height: 18px;
         margin-bottom: 8px;
       }
+      .note {
+        color: var(--mut);
+        font-size: 13px;
+        line-height: 1.45;
+        margin: 0 0 12px;
+      }
+      .note b {
+        color: var(--tx);
+      }
+      .chk {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        font-size: 14px;
+        line-height: 1.4;
+        margin: 14px 0;
+        cursor: pointer;
+      }
+      .chk input {
+        margin-top: 2px;
+        accent-color: var(--g);
+        width: 18px;
+        height: 18px;
+        flex: none;
+      }
+      .txh {
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+        color: var(--mut);
+        word-break: break-all;
+        margin: 0 0 12px;
+      }
       .csheet {
         width: 210px;
         margin: 6px auto 14px;
@@ -2754,6 +2786,7 @@
         feePct: 0,
         minWd: 10,
         holdHours: 24,
+        sepFee: 0 /* set from the server: > 0 when the fee is paid separately, on-chain */,
         apiBase: "/api",
         address: "",
         botLink: "https://t.me/Phygitalls_bot?startapp=",
@@ -3523,9 +3556,10 @@
  <label class="lbl" for="w-amt">AMOUNT</label><input class="field" id="w-amt" inputmode="decimal" placeholder="0.00" value="${bal > 0 ? bal.toFixed(2) : ""}" oninput="upWd()">
  <label class="lbl" for="w-to">YOUR WHOOP WALLET ADDRESS</label><input class="field" id="w-to" placeholder="Paste your Whoop address" oninput="upWd()">
  <p class="nowhoop">Don't have Whoop? <a onclick="openWhoop()">Open Whoop &rarr;</a></p>
- <div class="sum"><div><span>Amount</span><span id="s-a">$0.00</span></div><div><span>Withdrawal fee</span><span id="s-f">$0.00</span></div><div><span>Arrives</span><span>Within ${CFG.holdHours} hours</span></div><div><span>You receive</span><span id="s-r">$0.00</span></div></div>
- <p class="warn" id="w-err"></p><button class="cta" id="w-go" onclick="doWd()">Confirm withdrawal</button>`);
+ <div class="sum"><div><span>Amount</span><span id="s-a">$0.00</span></div><div><span>${CFG.sepFee ? "Processing fee (paid separately)" : "Withdrawal fee"}</span><span id="s-f">$0.00</span></div><div><span>Arrives</span><span>${CFG.sepFee ? `Up to ${CFG.holdHours} hours after fee is verified` : `Within ${CFG.holdHours} hours`}</span></div><div><span>You receive</span><span id="s-r">$0.00</span></div></div>
+ <p class="warn" id="w-err"></p><button class="cta" id="w-go" onclick="doWd()">${CFG.sepFee ? "Continue" : "Confirm withdrawal"}</button>`);
         upWd();
+        if (CFG.sepFee) resumeFeeWithdrawal();
       }
       function openWhoop() {
         Tg.openTelegramLink(CFG.whoopLink);
@@ -3535,14 +3569,14 @@
       }
       function upWd() {
         const a = +$("w-amt").value || 0,
-          f = wdFee(a),
+          f = CFG.sepFee ? 0 : wdFee(a) /* a separate fee is not taken out of the amount */,
           bal = S[wd.tok];
         let e = "";
         if (a && a < CFG.minWd) e = "Minimum withdrawal is " + m(CFG.minWd);
         else if (a > bal) e = "More than your balance (" + m(bal) + ")";
         else if (a && f >= a) e = "Amount doesn’t cover the fee";
         $("s-a").textContent = m(a);
-        $("s-f").textContent = m(f);
+        $("s-f").textContent = m(CFG.sepFee ? (a ? CFG.sepFee : 0) : f);
         $("s-r").textContent = m(Math.max(a - f, 0));
         $("w-err").textContent = e;
         const g = $("w-go");
@@ -3552,6 +3586,10 @@
       async function doWd() {
         const a = +$("w-amt").value;
         const destination = $("w-to").value.trim();
+        if (CFG.sepFee) {
+          openFeeNotice(a, destination);
+          return;
+        }
         const button = $("w-go");
         button.disabled = true;
         try {
@@ -3568,6 +3606,161 @@
           upWd();
         }
       }
+      /* ---------- Withdrawal processing fee (paid on-chain, verified by the server) ---------- */
+      let _feeTimer = null,
+        _watchWd = null;
+      const TOKN = () => (wd.tok === "usdt" ? "USDT" : "USDC");
+      function openFeeNotice(a, destination) {
+        wd.pending = { a, destination, tok: wd.tok };
+        const fee = m(CFG.sepFee);
+        sheet(`<h3>${fee} processing fee required</h3>
+ <p class="d">Before your withdrawal can be processed, a ${fee} processing fee must be paid and confirmed on Solana.</p>
+ <div class="sum"><div><span>Withdrawal</span><span>${m(a)} ${TOKN()}</span></div><div><span>Processing fee</span><span>${fee} USDC</span></div><div><span>You receive</span><span>${m(a)} ${TOKN()}</span></div></div>
+ <p class="note"><b>Why it's charged.</b> The fee covers reviewing your request and sending your payout. It is a platform charge, and it is not taken out of your withdrawal amount.</p>
+ <p class="note"><b>How it's collected.</b> You pay ${fee} in USDC from your own Solana wallet to our fee address. We only continue once that payment is confirmed on the blockchain, and nothing is taken from your balance for the fee.</p>
+ <p class="note"><b>Not the Solana network fee.</b> Every Solana transaction also costs a tiny network fee (a fraction of a cent, paid in SOL) that goes to the network, not to us. It is separate and in addition, so keep a little SOL in the wallet you pay from.</p>
+ <p class="note"><b>If something goes wrong.</b> If you don't pay within ${CFG.feeTtl || 30} minutes, the request is cancelled and nothing is charged. If your withdrawal is rejected, the ${fee} is returned to your USDC balance.</p>
+ <label class="chk"><input type="checkbox" id="fee-ok" onchange="$('fee-go').disabled=!this.checked;$('fee-go').style.opacity=this.checked?1:0.4">I understand that a ${fee} processing fee is charged separately from my withdrawal, in addition to the Solana network fee.</label>
+ <div class="row2"><button class="cta" id="fee-go" disabled style="opacity:0.4" onclick="startFeePayment()">Agree and continue</button><button class="sec" onclick="openWd()">Back</button></div>`);
+      }
+      async function startFeePayment() {
+        const p = wd.pending,
+          b = $("fee-go");
+        if (!p || !$("fee-ok").checked) return;
+        b.disabled = true;
+        try {
+          const w = await api("/withdraw", { token: p.tok, amount: p.a.toFixed(2), destination: p.destination });
+          showFeePay(w);
+          poll();
+        } catch (e) {
+          toast(e.message || "Could not start your withdrawal");
+          b.disabled = false;
+        }
+      }
+      async function resumeFeeWithdrawal() {
+        try {
+          const r = await api("/withdraw/open");
+          if (r.withdrawal && $("w-go")) showFeePay(r.withdrawal);
+        } catch (e) {}
+      }
+      function showFeePay(w) {
+        if (w.state !== "awaiting_payment") return showFeeResult(w);
+        const pay = w.payment,
+          tok = w.token === "usdt" ? "USDT" : "USDC";
+        sheet(`<h3>Pay the ${m(pay.amount)} processing fee</h3>
+ <p class="d">Pay exactly ${m(pay.amount)} in USDC on Solana. Your ${m(w.amount)} ${tok} withdrawal continues only after the payment is confirmed on-chain.</p>
+ <div class="sum"><div><span>Pay</span><span>${pay.amount.toFixed(2)} USDC</span></div><div><span>Network</span><span>Solana</span></div><div><span>Time left</span><span id="fee-left">--:--</span></div></div>
+ <div class="lbl">PAY TO</div><div class="addrbox"><code>${pay.recipient}</code></div>
+ <button class="cta" onclick="openWalletPay()">Open in my wallet</button>
+ <div class="wait" id="fee-st"><i></i><span id="fee-msg">Waiting for your payment to be confirmed on Solana…</span></div>
+ <p class="warn" id="fee-err"></p>
+ <p class="note">Use the button above so your payment carries its unique reference and is matched automatically. A payment sent by hand without the reference can't be matched. Solana's separate network fee (paid in SOL) is charged on top and doesn't go to us.</p>
+ <div class="row2"><button class="sec" onclick="cp(_feeW.payment.url)">Copy payment link</button><button class="sec" onclick="cancelFee()">Cancel withdrawal</button></div>`);
+        _feeW = w;
+        startFeePoll(w);
+      }
+      let _feeW = null;
+      function openWalletPay() {
+        const url = _feeW && _feeW.payment && _feeW.payment.url;
+        if (!url) return;
+        try {
+          if (typeof Tg.openLink === "function") Tg.openLink(url);
+          else window.location.href = url;
+        } catch (e) {
+          window.location.href = url;
+        }
+      }
+      function startFeePoll(w) {
+        clearInterval(_feeTimer);
+        let n = 0,
+          busy = false;
+        const tick = async () => {
+          if (!$("fee-st") || !$("sheet").classList.contains("on")) {
+            clearInterval(_feeTimer);
+            return;
+          }
+          const left = Math.max(0, Math.floor((w.payment.expiresAt - Date.now()) / 1000));
+          $("fee-left").textContent = Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0");
+          if (n++ % 4 || busy) return;
+          busy = true;
+          try {
+            const cur = await api("/withdraw/" + w.id);
+            if (cur.state !== "awaiting_payment") {
+              clearInterval(_feeTimer);
+              showFeeResult(cur);
+            } else if ($("fee-err")) {
+              $("fee-err").textContent = cur.payment.problem
+                ? "Still checking. " + cur.payment.problem
+                : "";
+            }
+          } catch (e) {
+            if ($("fee-err")) $("fee-err").textContent = "Can't reach the server. Retrying…";
+          }
+          busy = false;
+        };
+        _feeTimer = setInterval(tick, 1000);
+        tick();
+      }
+      async function cancelFee() {
+        if (!_feeW) return;
+        try {
+          clearInterval(_feeTimer);
+          showFeeResult(await api("/withdraw/" + _feeW.id + "/cancel", {}));
+        } catch (e) {
+          toast(e.message || "Could not cancel");
+          showFeePay(_feeW);
+        }
+      }
+      function showFeeResult(w) {
+        const fee = m(w.fee),
+          tok = w.token === "usdt" ? "USDT" : "USDC",
+          tx = (h) => (h ? `<p class="txh">${short(h)}</p>` : "");
+        const done = '<button class="cta" onclick="closeSheet()">Done</button>';
+        const R = {
+          queued: [
+            "Fee confirmed",
+            `We verified your ${fee} payment on Solana. Your ${m(w.amount)} ${tok} withdrawal is now queued for payout. It has not been sent yet; we'll tell you here once the transfer is confirmed.`,
+            tx(w.feeTxHash),
+          ],
+          paid: ["Withdrawal sent", `Your ${m(w.receive)} ${tok} withdrawal was sent.`, tx(w.payoutTxHash)],
+          rejected_refunded: [
+            "Withdrawal rejected",
+            `This withdrawal wasn't processed. Your ${fee} fee was returned to your USDC balance.`,
+            "",
+          ],
+          expired: ["Payment window closed", "No fee payment was confirmed in time, so the withdrawal was cancelled and nothing was charged. If you paid just now, it will be returned to your USDC balance.", ""],
+          cancelled: ["Withdrawal cancelled", "Your balance is available again. If you already sent the fee, it will be returned to your USDC balance.", ""],
+          rejected: ["Withdrawal not processed", "This withdrawal wasn't processed.", ""],
+        };
+        const [title, text, extra] = R[w.state] || R.rejected;
+        sheet(`<h3>${title}</h3><p class="d">${text}</p>${extra}${done}`);
+        if (w.state === "queued") watchWithdrawal(w.id);
+        poll();
+      }
+      /* After the fee is confirmed, tell the user when the payout actually completes. */
+      function watchWithdrawal(id) {
+        _watchWd = id;
+        try {
+          localStorage.setItem("phWatchWd", id);
+        } catch (e) {}
+      }
+      async function checkWatched() {
+        if (!CFG.apiBase || !_watchWd || document.hidden) return;
+        try {
+          const w = await api("/withdraw/" + _watchWd);
+          if (w.state === "paid") toast("Your " + m(w.receive) + " withdrawal was sent");
+          else if (w.state === "rejected_refunded" || w.state === "rejected") toast("Your withdrawal was rejected. Any fee was returned to your balance");
+          else return;
+          _watchWd = null;
+          try {
+            localStorage.removeItem("phWatchWd");
+          } catch (e) {}
+        } catch (e) {}
+      }
+      try {
+        _watchWd = localStorage.getItem("phWatchWd");
+      } catch (e) {}
+      setInterval(checkWatched, 30000);
       let dep = { tok: "USDC" };
       function openAdd() {
         _addOpen = true;
@@ -3859,6 +4052,12 @@
         }
       });
       if (CFG.apiBase) {
+        api("/withdraw/config")
+          .then((j) => {
+            CFG.sepFee = j.feeRequired ? j.fee : 0;
+            CFG.feeTtl = j.ttlMinutes;
+          })
+          .catch(() => {});
         api("/deposit-address")
           .then((j) => {
             CFG.address = j.address;

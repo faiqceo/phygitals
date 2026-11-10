@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import express from "express";
 import { createBot, normalizeAppUrl } from "./bot.js";
 import { PLAYERS_PER_POOL, drawPack, loadPacks, packStatus } from "./packs.js";
+import { USDC_MINT, createRpc, findFeePayment, newReference, solanaPayUrl } from "./withdrawal-fee.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -63,6 +64,27 @@ const MINTS = new Map([
 ]);
 const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 const SOLANA_KEY_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/* Withdrawal processing fee, paid on-chain by the user before a withdrawal is queued.
+   Only public values live here: the fee wallet is a receive-only address and the server
+   never holds a private key for it. The feature switches on when all of these are valid. */
+const FEE_WALLET_ADDRESS = (process.env.FEE_WALLET_ADDRESS || "").trim();
+const SOLANA_RPC_URL = (process.env.SOLANA_RPC_URL || "").trim();
+const FEE_COMMITMENT = process.env.SOLANA_COMMITMENT === "confirmed" ? "confirmed" : "finalized";
+const FEE_TTL_MS = Math.max(5, Number(process.env.FEE_PAYMENT_TTL_MINUTES || 30)) * 60_000;
+const FEE_LATE_WINDOW_MS = 24 * 60 * 60_000;
+const FEE_PROBLEM =
+  !FEE_WALLET_ADDRESS && !SOLANA_RPC_URL
+    ? null
+    : !isSolanaAddress(FEE_WALLET_ADDRESS)
+    ? "FEE_WALLET_ADDRESS is missing or not a valid Solana address"
+    : FEE_WALLET_ADDRESS === DEPOSIT_ADDRESS
+    ? "FEE_WALLET_ADDRESS must be different from DEPOSIT_ADDRESS"
+    : !/^https?:\/\//.test(SOLANA_RPC_URL)
+    ? "SOLANA_RPC_URL is missing or not an http(s) URL"
+    : null;
+const FEE_ENABLED = Boolean(FEE_WALLET_ADDRESS && SOLANA_RPC_URL && !FEE_PROBLEM);
+const feeRpc = FEE_ENABLED ? createRpc({ url: SOLANA_RPC_URL, commitment: FEE_COMMITMENT }) : null;
 
 fs.mkdirSync(path.dirname(DATABASE_PATH), { recursive: true });
 const db = new DatabaseSync(DATABASE_PATH);
@@ -190,6 +212,34 @@ db.exec(`
     sold_at TEXT
   );
   CREATE INDEX IF NOT EXISTS cards_owner ON cards(telegram_id, status);
+`);
+
+/* Withdrawal processing fee. A request waits in stage 'awaiting_fee' until its fee is
+   verified on-chain, then moves to 'queued', which is where the existing review flow
+   picks it up. Rows created before this feature are 'queued'. */
+if (!db.prepare("PRAGMA table_info(withdrawal_requests)").all().some((c) => c.name === "stage")) {
+  db.exec("ALTER TABLE withdrawal_requests ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'");
+}
+db.exec(`
+  CREATE TABLE IF NOT EXISTS withdrawal_fee_payments (
+    id TEXT PRIMARY KEY,
+    withdrawal_id TEXT NOT NULL UNIQUE REFERENCES withdrawal_requests(id),
+    telegram_id TEXT NOT NULL REFERENCES users(telegram_id),
+    reference TEXT NOT NULL UNIQUE,
+    recipient TEXT NOT NULL,
+    mint TEXT NOT NULL,
+    amount_micros INTEGER NOT NULL CHECK (amount_micros > 0),
+    status TEXT NOT NULL DEFAULT 'awaiting'
+      CHECK (status IN ('awaiting', 'confirmed', 'expired', 'cancelled', 'refunded')),
+    signature TEXT UNIQUE,
+    payer TEXT,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    confirmed_at INTEGER,
+    closed_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS fee_payments_status ON withdrawal_fee_payments(status, closed_at);
 `);
 
 /* Migration: track whether a user has finished the welcome screen. Accounts that
@@ -631,6 +681,190 @@ async function reconcilePending({ olderThanSeconds = 20, limit = 20 } = {}) {
   return rows.length;
 }
 
+
+/* ---------- Withdrawal processing fee ---------- */
+const feeChecking = new Set();
+const feeLastCheck = new Map();
+
+function feePaymentRow(id) {
+  return db.prepare("SELECT * FROM withdrawal_fee_payments WHERE id = ?").get(id);
+}
+
+function feePaymentFor(withdrawalId) {
+  return db.prepare("SELECT * FROM withdrawal_fee_payments WHERE withdrawal_id = ?").get(withdrawalId);
+}
+
+/* The state the app shows. It is derived from stored facts, never from the browser. */
+function withdrawalState(w, p) {
+  if (w.status === "paid") return "paid";
+  if (w.status === "rejected") return p && p.status === "refunded" ? "rejected_refunded" : p?.status === "expired" ? "expired" : p?.status === "cancelled" ? "cancelled" : "rejected";
+  if (p && p.status === "awaiting") return "awaiting_payment";
+  return "queued";
+}
+
+function publicFeeWithdrawal(w, p) {
+  const state = withdrawalState(w, p);
+  return {
+    id: w.id,
+    state,
+    status: w.status,
+    token: w.token,
+    amount: w.amount_micros / MICRO,
+    receive: (w.amount_micros - w.fee_micros) / MICRO,
+    destination: w.destination,
+    fee: p ? p.amount_micros / MICRO : w.fee_micros / MICRO,
+    feeTxHash: p?.signature || null,
+    payoutTxHash: w.payout_reference || null,
+    createdAt: `${w.created_at.replace(" ", "T")}Z`,
+    payment:
+      p && p.status === "awaiting"
+        ? {
+            recipient: p.recipient,
+            mint: p.mint,
+            amount: p.amount_micros / MICRO,
+            reference: p.reference,
+            expiresAt: p.expires_at,
+            url: solanaPayUrl({
+              recipient: p.recipient,
+              micros: p.amount_micros,
+              mint: p.mint,
+              reference: p.reference,
+              label: "Phygitals",
+              message: "Withdrawal processing fee",
+            }),
+            problem: p.last_error || null,
+          }
+        : null,
+  };
+}
+
+/* Closes a payment nobody paid and releases the reserved withdrawal. */
+function closeUnpaidFee(paymentId, status, actor) {
+  return inTransaction(() => {
+    const changed = db
+      .prepare(
+        `UPDATE withdrawal_fee_payments SET status = ?, closed_at = ?
+         WHERE id = ? AND status = 'awaiting'`,
+      )
+      .run(status, Date.now(), paymentId);
+    if (!changed.changes) return false;
+    const p = feePaymentRow(paymentId);
+    db.prepare(
+      `UPDATE withdrawal_requests SET status = 'rejected', stage = 'cancelled', processed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'pending' AND stage = 'awaiting_fee'`,
+    ).run(p.withdrawal_id);
+    audit(actor, `withdrawal_fee_${status}`, p.withdrawal_id, { paymentId });
+    return true;
+  });
+}
+
+/* Reads the chain for one payment and settles it. Safe to call repeatedly and concurrently:
+   a payment is confirmed at most once (guarded update plus UNIQUE signature), and a failed
+   or unreachable lookup never marks anything paid. */
+async function checkFeePayment(paymentId) {
+  if (!feeRpc || feeChecking.has(paymentId)) return;
+  const p = feePaymentRow(paymentId);
+  if (!p) return;
+  const open = p.status === "awaiting";
+  const late =
+    (p.status === "expired" || p.status === "cancelled") &&
+    !p.signature &&
+    Date.now() - (p.closed_at || 0) < FEE_LATE_WINDOW_MS;
+  if (!open && !late) return;
+
+  feeChecking.add(paymentId);
+  try {
+    let found;
+    try {
+      found = await findFeePayment(feeRpc, {
+        reference: p.reference,
+        recipient: p.recipient,
+        mint: p.mint,
+        minMicros: p.amount_micros,
+      });
+    } catch (error) {
+      const message = String(error.message).slice(0, 200);
+      if (p.last_error !== message) {
+        db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(message, p.id);
+        audit("system", "withdrawal_fee_check_failed", p.withdrawal_id, { error: message });
+      }
+      return;
+    }
+
+    if (found.status === "paid") {
+      try {
+        inTransaction(() => {
+          const cur = feePaymentRow(p.id);
+          if (cur.status === "awaiting") {
+            db.prepare(
+              `UPDATE withdrawal_fee_payments SET status = 'confirmed', signature = ?, payer = ?,
+                 confirmed_at = ?, last_error = NULL WHERE id = ? AND status = 'awaiting'`,
+            ).run(found.signature, found.payer, Date.now(), p.id);
+            db.prepare(
+              `UPDATE withdrawal_requests SET stage = 'queued'
+               WHERE id = ? AND status = 'pending' AND stage = 'awaiting_fee'`,
+            ).run(p.withdrawal_id);
+            audit("system", "withdrawal_fee_confirmed", p.withdrawal_id, {
+              signature: found.signature,
+              payer: found.payer,
+              receivedMicros: found.receivedMicros,
+              slot: found.slot,
+            });
+          } else if ((cur.status === "expired" || cur.status === "cancelled") && !cur.signature) {
+            /* Paid after the request was closed: the withdrawal no longer exists, so the
+               fee goes back to the user's USDC balance instead of being kept. */
+            db.prepare(
+              `UPDATE withdrawal_fee_payments SET status = 'refunded', signature = ?, payer = ?, last_error = NULL
+               WHERE id = ? AND signature IS NULL`,
+            ).run(found.signature, found.payer, p.id);
+            db.prepare("UPDATE users SET usdc_micros = usdc_micros + ? WHERE telegram_id = ?").run(
+              found.receivedMicros,
+              p.telegram_id,
+            );
+            audit("system", "withdrawal_fee_late_refunded", p.withdrawal_id, {
+              signature: found.signature,
+              receivedMicros: found.receivedMicros,
+            });
+          }
+        });
+      } catch (error) {
+        if (/UNIQUE/i.test(String(error.message))) {
+          audit("system", "withdrawal_fee_signature_reused", p.withdrawal_id, { signature: found.signature });
+          db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(
+            "That transaction was already used for another payment.",
+            p.id,
+          );
+        } else throw error;
+      }
+      return;
+    }
+
+    if (open && Date.now() > p.expires_at) {
+      closeUnpaidFee(p.id, "expired", "system");
+      return;
+    }
+    const note = found.status === "invalid" ? found.reason.slice(0, 200) : null;
+    if (note !== p.last_error)
+      db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(note, p.id);
+  } finally {
+    feeChecking.delete(paymentId);
+  }
+}
+
+async function reconcileFeePayments() {
+  if (!feeRpc) return 0;
+  const rows = db
+    .prepare(
+      `SELECT id FROM withdrawal_fee_payments
+       WHERE status = 'awaiting'
+          OR (status IN ('expired', 'cancelled') AND signature IS NULL AND closed_at > ?)
+       ORDER BY created_at LIMIT 50`,
+    )
+    .all(Date.now() - FEE_LATE_WINDOW_MS);
+  for (const row of rows) await checkFeePayment(row.id);
+  return rows.length;
+}
+
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
@@ -953,23 +1187,30 @@ app.post("/api/link-wallet", auth, (req, res) => {
 
 app.get("/admin/withdrawals", adminAuth, (req, res) => {
   const status = req.query.status === "all" ? null : "pending";
+  /* Requests still waiting for their processing fee are not reviewable, so they are not
+     in the pending queue. */
   const requests = status
     ? db
         .prepare(
-          `SELECT id, telegram_id AS telegramId, token, destination,
-            amount_micros * 1.0 / ? AS amount, fee_micros * 1.0 / ? AS fee,
-            (amount_micros - fee_micros) * 1.0 / ? AS receive, status, created_at AS createdAt
-           FROM withdrawal_requests WHERE status = ? ORDER BY created_at`,
+          `SELECT w.id, w.telegram_id AS telegramId, w.token, w.destination,
+            w.amount_micros * 1.0 / ? AS amount, w.fee_micros * 1.0 / ? AS fee,
+            (w.amount_micros - w.fee_micros) * 1.0 / ? AS receive, w.status, w.stage,
+            w.created_at AS createdAt, p.signature AS feeTxHash, p.amount_micros * 1.0 / ? AS feePaid
+           FROM withdrawal_requests w LEFT JOIN withdrawal_fee_payments p ON p.withdrawal_id = w.id
+           WHERE w.status = ? AND w.stage = 'queued' ORDER BY w.created_at`,
         )
-        .all(MICRO, MICRO, MICRO, status)
+        .all(MICRO, MICRO, MICRO, MICRO, status)
     : db
         .prepare(
-          `SELECT id, telegram_id AS telegramId, token, destination,
-            amount_micros * 1.0 / ? AS amount, fee_micros * 1.0 / ? AS fee,
-            (amount_micros - fee_micros) * 1.0 / ? AS receive, status, created_at AS createdAt
-           FROM withdrawal_requests ORDER BY created_at DESC LIMIT 500`,
+          `SELECT w.id, w.telegram_id AS telegramId, w.token, w.destination,
+            w.amount_micros * 1.0 / ? AS amount, w.fee_micros * 1.0 / ? AS fee,
+            (w.amount_micros - w.fee_micros) * 1.0 / ? AS receive, w.status, w.stage,
+            w.created_at AS createdAt, p.signature AS feeTxHash, p.amount_micros * 1.0 / ? AS feePaid,
+            w.payout_reference AS payoutTxHash
+           FROM withdrawal_requests w LEFT JOIN withdrawal_fee_payments p ON p.withdrawal_id = w.id
+           ORDER BY w.created_at DESC LIMIT 500`,
         )
-        .all(MICRO, MICRO, MICRO);
+        .all(MICRO, MICRO, MICRO, MICRO);
   res.json({ requests });
 });
 
@@ -997,9 +1238,24 @@ app.post("/api/withdraw", auth, (req, res) => {
   if (amount <= WITHDRAWAL_FEE)
     return res.status(400).json({ error: "Amount does not cover the withdrawal fee." });
 
+  if (FEE_ENABLED) rateLimit(`withdraw:${req.telegram.id}`, 10, 10 * 60_000);
+
   const request = inTransaction(() => {
     const user = findUser(req.telegram.id);
     if (!user) throw new ApiError(404, "Account not found.");
+    if (FEE_ENABLED) {
+      const open = db
+        .prepare(
+          `SELECT id FROM withdrawal_requests
+           WHERE telegram_id = ? AND status = 'pending' AND stage = 'awaiting_fee'`,
+        )
+        .get(req.telegram.id);
+      if (open)
+        throw new ApiError(
+          409,
+          "You already have a withdrawal waiting for its processing fee. Finish or cancel it first.",
+        );
+    }
     const reserved = db
       .prepare(
         `SELECT COALESCE(SUM(amount_micros), 0) AS amount FROM withdrawal_requests
@@ -1009,6 +1265,39 @@ app.post("/api/withdraw", auth, (req, res) => {
     if (user[`${token}_micros`] - reserved < amount)
       throw new ApiError(400, "Insufficient available balance.");
     const id = crypto.randomUUID();
+    if (FEE_ENABLED) {
+      /* The processing fee is paid on-chain, separately, so it is not also taken out of the
+         withdrawal: fee_micros is 0 and the user receives the full amount. */
+      db.prepare(
+        `INSERT INTO withdrawal_requests
+          (id, telegram_id, token, destination, amount_micros, fee_micros, stage)
+         VALUES (?, ?, ?, ?, ?, 0, 'awaiting_fee')`,
+      ).run(id, req.telegram.id, token, destination, amount);
+      const now = Date.now();
+      db.prepare(
+        `INSERT INTO withdrawal_fee_payments
+          (id, withdrawal_id, telegram_id, reference, recipient, mint, amount_micros, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        crypto.randomUUID(),
+        id,
+        req.telegram.id,
+        newReference(),
+        FEE_WALLET_ADDRESS,
+        USDC_MINT,
+        WITHDRAWAL_FEE,
+        now,
+        now + FEE_TTL_MS,
+      );
+      audit(`user:${req.telegram.id}`, "withdrawal_requested", id, {
+        token,
+        amount,
+        destination,
+        feeMicros: WITHDRAWAL_FEE,
+        awaitingFee: true,
+      });
+      return id;
+    }
     db.prepare(
       `INSERT INTO withdrawal_requests
         (id, telegram_id, token, destination, amount_micros, fee_micros)
@@ -1016,12 +1305,78 @@ app.post("/api/withdraw", auth, (req, res) => {
     ).run(id, req.telegram.id, token, destination, amount, WITHDRAWAL_FEE);
     return id;
   });
+  if (FEE_ENABLED) {
+    const w = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(request);
+    return res.status(202).json(publicFeeWithdrawal(w, feePaymentFor(request)));
+  }
   res.status(202).json({
     id: request,
     status: "pending",
     fee: WITHDRAWAL_FEE / MICRO,
     receive: (amount - WITHDRAWAL_FEE) / MICRO,
   });
+});
+
+/* Withdrawal processing fee: what the app needs to explain and collect it. */
+app.get("/api/withdraw/config", auth, (_req, res) => {
+  res.json({
+    feeRequired: FEE_ENABLED,
+    fee: WITHDRAWAL_FEE / MICRO,
+    token: "USDC",
+    network: "Solana",
+    ttlMinutes: Math.round(FEE_TTL_MS / 60_000),
+  });
+});
+
+function ownWithdrawal(req) {
+  const w = db
+    .prepare("SELECT * FROM withdrawal_requests WHERE id = ? AND telegram_id = ?")
+    .get(String(req.params.id), req.telegram.id);
+  if (!w) throw new ApiError(404, "Withdrawal not found.");
+  return w;
+}
+
+app.get("/api/withdraw/open", auth, async (req, res) => {
+  const w = db
+    .prepare(
+      `SELECT * FROM withdrawal_requests
+       WHERE telegram_id = ? AND status = 'pending' AND stage = 'awaiting_fee'
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(req.telegram.id);
+  if (!w) return res.json({ withdrawal: null });
+  const p = feePaymentFor(w.id);
+  await checkFeePayment(p.id);
+  const fresh = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
+  res.json({ withdrawal: publicFeeWithdrawal(fresh, feePaymentFor(w.id)) });
+});
+
+app.get("/api/withdraw/:id", auth, async (req, res) => {
+  const w = ownWithdrawal(req);
+  let p = feePaymentFor(w.id);
+  /* Opening this status is what asks the chain "has it arrived?" — the answer comes from
+     the chain, not from anything the browser says. Lookups are throttled per payment. */
+  if (p && p.status === "awaiting" && Date.now() - (feeLastCheck.get(p.id) || 0) > 3000) {
+    feeLastCheck.set(p.id, Date.now());
+    await checkFeePayment(p.id);
+    p = feePaymentFor(w.id);
+  }
+  const fresh = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
+  res.json(publicFeeWithdrawal(fresh, p));
+});
+
+app.post("/api/withdraw/:id/cancel", auth, async (req, res) => {
+  const w = ownWithdrawal(req);
+  const p = feePaymentFor(w.id);
+  if (!p) throw new ApiError(409, "This withdrawal has no pending fee to cancel.");
+  /* Look at the chain first so a payment that is already on its way is never cancelled. */
+  await checkFeePayment(p.id);
+  const now = feePaymentFor(w.id);
+  if (now.status === "confirmed")
+    throw new ApiError(409, "Your fee payment was already received, so this withdrawal is queued.");
+  if (now.status === "awaiting") closeUnpaidFee(now.id, "cancelled", `user:${req.telegram.id}`);
+  const fresh = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
+  res.json(publicFeeWithdrawal(fresh, feePaymentFor(w.id)));
 });
 
 app.post("/admin/withdrawals/:id/review", adminAuth, (req, res) => {
@@ -1041,6 +1396,24 @@ app.post("/admin/withdrawals/:id/review", adminAuth, (req, res) => {
     if (!request) throw new ApiError(404, "Withdrawal request not found.");
     if (request.status !== "pending")
       throw new ApiError(409, "Withdrawal request was already reviewed.");
+    if (request.stage !== "queued")
+      throw new ApiError(409, "This withdrawal is still waiting for its processing fee.");
+    if (action === "reject") {
+      /* The fee was paid for a withdrawal that will not happen, so it goes back to the
+         user's USDC balance. */
+      const fee = feePaymentFor(request.id);
+      if (fee && fee.status === "confirmed") {
+        db.prepare("UPDATE users SET usdc_micros = usdc_micros + ? WHERE telegram_id = ?").run(
+          fee.amount_micros,
+          request.telegram_id,
+        );
+        db.prepare("UPDATE withdrawal_fee_payments SET status = 'refunded', closed_at = ? WHERE id = ?").run(
+          Date.now(),
+          fee.id,
+        );
+        audit("admin", "withdrawal_fee_refunded", request.id, { amountMicros: fee.amount_micros });
+      }
+    }
     if (action === "paid") {
       const column = `${request.token}_micros`;
       const result = db
@@ -1053,6 +1426,9 @@ app.post("/admin/withdrawals/:id/review", adminAuth, (req, res) => {
       `UPDATE withdrawal_requests SET status = ?, payout_reference = ?, processed_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
     ).run(action === "paid" ? "paid" : "rejected", action === "paid" ? reference.trim() : null, request.id);
+    audit("admin", action === "paid" ? "withdrawal_paid" : "withdrawal_rejected", request.id, {
+      reference: action === "paid" ? reference.trim() : null,
+    });
   });
   res.json({ status: action === "paid" ? "paid" : "rejected" });
 });
@@ -1381,6 +1757,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   setInterval(() => {
     reconcilePending().catch((error) => console.error("Whoop reconcile failed:", error));
   }, 30_000).unref();
+  setInterval(() => {
+    reconcileFeePayments().catch((error) => console.error("Fee payment reconcile failed:", error));
+  }, 15_000).unref();
   app.listen(PORT, () => {
     console.log(`Phygitals server listening on port ${PORT}`);
     if (!BOT_TOKEN) console.warn("BOT_TOKEN is not set; Telegram API requests will be rejected.");
@@ -1393,6 +1772,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (!isSolanaAddress(DEPOSIT_ADDRESS))
       console.warn("DEPOSIT_ADDRESS is missing or invalid; deposits are disabled.");
     if (!HELIUS_AUTH) console.warn("HELIUS_AUTH is not set; deposit webhook is disabled.");
+    if (FEE_ENABLED)
+      console.log(`Withdrawal processing fee: ON ($${WITHDRAWAL_FEE / MICRO} USDC to ${FEE_WALLET_ADDRESS}, ${FEE_COMMITMENT})`);
+    else
+      console.warn(
+        `Withdrawal processing fee: OFF (${FEE_PROBLEM || "set FEE_WALLET_ADDRESS and SOLANA_RPC_URL to turn it on"}). ` +
+          "Withdrawals use the old behavior and take the fee out of the amount.",
+      );
     console.log(
       `Database: ${DATABASE_PATH} (${db.prepare("SELECT COUNT(*) AS n FROM users").get().n} users). ` +
         "If this says 0 users after every restart, the disk is being wiped; set DATABASE_PATH to persistent storage.",
@@ -1410,4 +1796,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   });
 }
 
-export { app, db, bot, reconcilePending, attemptPayout };
+export { app, db, bot, reconcilePending, attemptPayout, reconcileFeePayments };

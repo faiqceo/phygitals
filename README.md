@@ -17,6 +17,27 @@ The backend verifies Telegram Web App data, stores Telegram accounts and $1 refe
 
 With `ADMIN_TOKEN`, review pending withdrawals at `GET /admin/withdrawals` and unclaimed deposits at `GET /admin/unclaimed-deposits` using the `X-Admin-Token` header. After manually sending a payout, mark it complete with `POST /admin/withdrawals/{id}/review` and `{"action":"paid","reference":"<payout transaction id>"}`; use `{"action":"reject"}` to release a rejected request. Pack openings, card sales and card withdrawals remain disabled in the live API flow until they are server-authoritative.
 
+## Withdrawal processing fee (on-chain, verified)
+
+When enabled, every withdrawal first needs a **$3.29 USDC processing fee**, paid by the user on Solana to your fee wallet. The fee is separate from the withdrawal (it is not also deducted from the amount) and separate from Solana's own network fee, and the app explains both before the user confirms.
+
+Set these in `.env` or your host's dashboard (all public values; **no private key is ever given to the server**):
+- `FEE_WALLET_ADDRESS`: the Solana address that receives fees. Must be a wallet you control and must differ from `DEPOSIT_ADDRESS`, or fee payments would also be treated as deposits.
+- `SOLANA_RPC_URL`: an RPC endpoint (for example your Helius RPC URL) the server uses to read the chain. Treat it as a secret if it contains an API key.
+- Optional: `SOLANA_COMMITMENT` (`finalized`, the default, or `confirmed`) and `FEE_PAYMENT_TTL_MINUTES` (default 30).
+
+If either required value is missing or invalid, the server logs why and falls back to the old behavior (fee deducted from the amount).
+
+How it works:
+1. The user confirms the notice. The server creates the withdrawal in stage `awaiting_fee` (the amount is reserved) with a unique payment **reference** and a Solana Pay link.
+2. The server finds the payment itself by looking the reference up on-chain and checks that the transaction succeeded, carries that reference, and credited at least $3.29 USDC to `FEE_WALLET_ADDRESS`. A response from the browser is never trusted. A background job checks every 15 seconds as well.
+3. Once verified, the withdrawal becomes `queued` and appears in `GET /admin/withdrawals`, where the existing manual payout and review flow takes over. Requests still waiting for their fee are never reviewable. The fee transaction hash is stored on the payment, and the payout hash is the `reference` you enter when marking the request paid.
+4. Each payment is confirmed at most once (unique reference, unique transaction signature, guarded state change).
+5. Unpaid requests expire after the time limit and release the reserved amount. A payment that arrives after expiry, or a withdrawal you reject after the fee was paid, is returned to the user's USDC balance instead of being kept.
+6. Everything is written to `audit_log` (`withdrawal_requested`, `withdrawal_fee_confirmed`, `withdrawal_fee_expired`, `withdrawal_fee_refunded`, `withdrawal_paid`, ...).
+
+The server still does not send the payout itself; that remains the manual step described above.
+
 ## Telegram bot (/start)
 
 On startup the server uses `BOT_TOKEN` + `APP_URL` to register itself with Telegram automatically: it sets the webhook (`/telegram/webhook`, protected by a secret header), the `/start` command, the **Play** menu button that opens the Mini App, and the bot description. When someone sends `/start` the bot replies with a welcome message and an **Open Phygitals** button that launches the Mini App. `/start <referral code>` carries the code into the app. Edit the text in `welcomeText()` in `bot.js`.
