@@ -1,3 +1,4 @@
+<!-- phygitals/wallet.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -92,6 +93,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--g1);outline-off
     <button class="tile" onclick="openWd('bank')"><i>🏛</i>To Bank</button>
     <button class="tile" onclick="openWd('wallet')"><i>➤</i>To Wallet</button>
   </div>
+  <button class="dark" style="margin-top:12px" onclick="openWhoop()">Withdraw to Whoop Wallet</button>
 </div>
 
 <div class="addr">
@@ -202,6 +204,106 @@ function upWd(){const a=+$("w-amt").value||0,f=wdFee(a),bal=S[wd.tok];let err=""
 function doWd(){const a=+$("w-amt").value;haptic();
   /* TODO: backend call; show real tx status */
   S[wd.tok]-=a;render();closeSheet();toast("Withdrawal submitted")}
+
+/* ---- Withdraw to Whoop Wallet (real backend; nothing here changes a balance locally) ---- */
+const esc=t=>String(t).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function api(method,url,body){
+  const r=await fetch(url,{method,headers:{"Content-Type":"application/json","X-Telegram-Init-Data":Tg.initData||""},body:body?JSON.stringify(body):undefined});
+  let d={};try{d=await r.json()}catch(e){}
+  return{status:r.status,ok:r.ok,data:d};
+}
+let wh={st:null,amt:"",key:null};
+function whoopTop(title,back){return `<div class="sh-top"><button class="sq" aria-label="${back?"Back":"Close"}" onclick="${back||"closeSheet()"}">${back?"←":"✕"}</button><b>${title}</b><span style="width:44px"></span></div>`}
+async function openWhoop(){
+  openSheet(whoopTop("Whoop Wallet")+'<p class="d">Loading…</p>');
+  const r=await api("GET","/api/whoop/status");
+  if(!r.ok){openSheet(whoopTop("Whoop Wallet")+`<p class="warn">${esc(r.data.error||"Could not load. Open this from Telegram.")}</p>`);return}
+  wh.st=r.data;
+  if(!wh.st.configured){openSheet(whoopTop("Whoop Wallet")+'<p class="warn">Whoop Wallet withdrawals are not switched on yet.</p>');return}
+  wh.st.linked?whoopForm():whoopLink();
+}
+function whoopLink(msg){
+  openSheet(whoopTop("Connect Whoop Wallet")+`<p class="d">Open Whoop Wallet, go to Profile, then Phygitals, and tap <b>Generate link code</b>. Enter the code here. You only do this once.</p>
+  <div class="lbl">LINK CODE</div>
+  <input class="field" id="wl-code" placeholder="ABCD-EFGH" autocapitalize="characters" autocomplete="off" maxlength="9">
+  <p class="warn" id="wl-err">${msg?esc(msg):""}</p>
+  <button class="white" id="wl-go" onclick="doLink()">Connect</button>`);
+}
+async function doLink(){
+  const code=$("wl-code").value.trim();if(!code)return;
+  $("wl-go").disabled=true;
+  const r=await api("POST","/api/whoop/link",{code});
+  if(r.ok){wh.st=r.data;toast("Whoop Wallet connected");whoopForm()}else whoopLink(r.data.error||"Could not connect.");
+}
+async function doUnlink(){
+  const r=await api("POST","/api/whoop/unlink");
+  if(r.ok){wh.st=r.data;toast("Disconnected");whoopLink()}else{$("wf-err").textContent=r.data.error||"Could not disconnect."}
+}
+function whoopForm(){
+  const st=wh.st;
+  openSheet(whoopTop("Withdraw to Whoop")+`
+  <div class="lbl">DESTINATION</div>
+  <div class="row" style="background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:14px 16px"><span class="n">@${esc(st.whoopUsername)}</span><span class="tag">Whoop Wallet</span></div>
+  <button class="link" onclick="doUnlink()">Disconnect this wallet</button>
+  <div class="lbl">AMOUNT · AVAILABLE ${m(st.available)}</div>
+  <input class="field" id="wf-amt" inputmode="decimal" placeholder="0.00" value="${esc(wh.amt)}" oninput="upWhoop()">
+  <div class="sum">
+    <div><span>Amount</span><span id="wf-a">$0.00</span></div>
+    <div><span>Phygitals service fee</span><span id="wf-f">${m(st.fee)}</span></div>
+    <div><span>Whoop Wallet receives</span><span id="wf-r">$0.00</span></div>
+  </div>
+  <p class="d">The service fee is charged by Phygitals. It is not a network fee.</p>
+  <p class="warn" id="wf-err"></p>
+  <button class="white" id="wf-go" onclick="whoopReview()">Review withdrawal</button>`);
+  upWhoop();
+}
+function whoopAmt(){const v=$("wf-amt").value.trim();return /^\d{1,7}(\.\d{1,2})?$/.test(v)?+v:0}
+function upWhoop(){
+  const st=wh.st,a=whoopAmt();let err="";
+  wh.amt=$("wf-amt").value;
+  if($("wf-amt").value&&!a)err="Enter an amount with up to 2 decimals";
+  else if(a&&a<st.min)err="Minimum withdrawal is "+m(st.min);
+  else if(a>st.available)err="More than your available balance ("+m(st.available)+")";
+  else if(a&&a<=st.fee)err="Amount doesn’t cover the service fee";
+  $("wf-a").textContent=m(a);$("wf-r").textContent=m(Math.max(a-st.fee,0));$("wf-err").textContent=err;
+  const b=$("wf-go");b.disabled=!a||!!err;b.style.opacity=b.disabled?.4:1;
+}
+async function whoopReview(){
+  const a=whoopAmt();if(!a)return;
+  const r=await api("GET","/api/whoop/quote?amount="+a.toFixed(2));
+  if(!r.ok){$("wf-err").textContent=r.data.error||"Could not get a quote.";return}
+  const q=r.data;wh.q=q;wh.key=(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9_-]/g,"")+"0000";
+  openSheet(whoopTop("Confirm withdrawal","whoopForm()")+`
+  <div class="sum">
+    <div><span>To</span><span>${esc(q.destination)} (Whoop Wallet)</span></div>
+    <div><span>Withdraw from Phygitals</span><span>${m(q.amount)}</span></div>
+    <div><span>Phygitals service fee</span><span>${m(q.fee)}</span></div>
+    <div><span>Whoop Wallet receives</span><span>${m(q.receive)}</span></div>
+  </div>
+  <p class="d">You are approving this transfer to your connected Whoop Wallet. Your balance is only reduced after Whoop Wallet confirms it received the funds.</p>
+  <p class="warn" id="wc-err"></p>
+  <button class="white" id="wc-go" onclick="whoopConfirm()">Confirm and withdraw ${m(q.amount)}</button>`);
+}
+async function whoopConfirm(){
+  const q=wh.q;$("wc-go").disabled=true;$("wc-go").textContent="Sending…";
+  const r=await api("POST","/api/whoop/withdraw",{amount:q.amount.toFixed(2),expectedFee:q.fee,confirm:true,idempotencyKey:wh.key});
+  if(r.status===200||r.status===202||r.status===422)return whoopResult(r.data);
+  $("wc-err").textContent=r.data.error||"Something went wrong. You were not charged.";
+  $("wc-go").disabled=false;$("wc-go").textContent="Try again";   /* same key, so a retry can never pay twice */
+}
+async function whoopResult(w){
+  const show=(title,body)=>openSheet(whoopTop(title)+`<p class="d">${body}</p><button class="white" onclick="closeSheet();loadMe()">Done</button>`);
+  if(w.status==="completed"){toast("Withdrawal confirmed");return show("Withdrawal complete",`${m(w.receive)} was added to ${esc(w.destination)} on Whoop Wallet. Reference: <code>${esc(w.whoopTxId||w.id)}</code>`)}
+  if(w.status==="failed")return show("Withdrawal failed",`${esc(w.error||"Whoop Wallet declined the transfer.")} Your balance was not changed.`);
+  openSheet(whoopTop("Processing…")+'<p class="d">Waiting for Whoop Wallet to confirm. Your balance is held, not spent. You can close this and check back.</p>');
+  for(let i=0;i<20;i++){
+    await new Promise(r=>setTimeout(r,3000));
+    const r=await api("GET","/api/whoop/withdrawals/"+encodeURIComponent(w.id));
+    if(r.ok&&r.data.status!=="pending")return whoopResult(r.data);
+  }
+  show("Still processing","This is taking longer than usual. Your balance stays held until Whoop Wallet confirms, and it will finish automatically.");
+}
+async function loadMe(){const r=await api("GET","/api/me");if(r.ok){S.pack=r.data.credits||0;render()}}
 
 render();
 </script>

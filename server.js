@@ -1,3 +1,4 @@
+// phygitals/server.js
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -19,6 +20,11 @@ const MICRO = 1_000_000;
 const REFERRAL_BONUS = MICRO;
 const WITHDRAWAL_FEE = 3_290_000;
 const MIN_WITHDRAWAL = 10 * MICRO;
+const DEFAULT_WHOOP_FEE = 3 * MICRO;
+const MAX_WHOOP_FEE = 50 * MICRO;
+const CENT = MICRO / 100;
+const WHOOP_TIMEOUT_MS = 8000;
+const WHOOP_FEE_KEY = "whoop_withdrawal_fee_micros";
 const MINTS = new Map([
   ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "usdc"],
   ["Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "usdt"],
@@ -85,6 +91,55 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS withdrawal_pending_user
     ON withdrawal_requests(telegram_id, status);
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS whoop_links (
+    telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id),
+    whoop_username TEXT NOT NULL,
+    whoop_name TEXT,
+    linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS whoop_withdrawals (
+    id TEXT PRIMARY KEY,
+    telegram_id TEXT NOT NULL REFERENCES users(telegram_id),
+    whoop_username TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    amount_micros INTEGER NOT NULL CHECK (amount_micros > 0),
+    fee_micros INTEGER NOT NULL CHECK (fee_micros >= 0),
+    net_micros INTEGER NOT NULL CHECK (net_micros > 0),
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending', 'completed', 'failed')),
+    whoop_tx_id TEXT,
+    failure_reason TEXT,
+    last_error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    UNIQUE (telegram_id, idempotency_key)
+  );
+  CREATE INDEX IF NOT EXISTS whoop_withdrawals_status
+    ON whoop_withdrawals(status, updated_at);
+  CREATE TABLE IF NOT EXISTS ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    withdrawal_id TEXT NOT NULL REFERENCES whoop_withdrawals(id),
+    telegram_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('whoop_withdrawal', 'service_fee')),
+    amount_micros INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (withdrawal_id, kind)
+  );
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    ref TEXT,
+    detail TEXT
+  );
 `);
 
 class ApiError extends Error {
@@ -235,7 +290,7 @@ function publicProfile(id) {
   return {
     id: user.telegram_id,
     code: user.referral_code,
-    credits: user.credits_micros / MICRO,
+    credits: (user.credits_micros - whoopReserved(id)) / MICRO,
     usdc: (user.usdc_micros - (reserved.usdc || 0)) / MICRO,
     usdt: (user.usdt_micros - (reserved.usdt || 0)) / MICRO,
     wallet: user.wallet,
@@ -314,6 +369,208 @@ function toMicros(value) {
 
 function webhookAuthorized(value) {
   return HELIUS_AUTH && safeEqual(value, HELIUS_AUTH);
+}
+
+
+/* ---------- Whoop Wallet integration ---------- */
+const whoopUrl = () => (process.env.WHOOP_API_URL || "").replace(/\/+$/, "");
+const whoopKey = () => process.env.WHOOP_INTEGRATION_KEY || "";
+const whoopConfigured = () => !!(whoopUrl() && whoopKey());
+const inflight = new Set();
+const rateHits = new Map();
+
+function rateLimit(key, max, windowMs) {
+  const t = Date.now();
+  const hits = (rateHits.get(key) || []).filter((x) => t - x < windowMs);
+  if (hits.length >= max) {
+    rateHits.set(key, hits);
+    throw new ApiError(429, "Too many attempts. Please wait a few minutes.");
+  }
+  hits.push(t);
+  rateHits.set(key, hits);
+}
+
+function audit(actor, action, ref, detail) {
+  db.prepare("INSERT INTO audit_log (actor, action, ref, detail) VALUES (?, ?, ?, ?)").run(
+    actor,
+    action,
+    ref ?? null,
+    detail === undefined ? null : JSON.stringify(detail),
+  );
+}
+
+function whoopFeeMicros() {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(WHOOP_FEE_KEY);
+  const value = row ? Number(row.value) : DEFAULT_WHOOP_FEE;
+  return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_WHOOP_FEE;
+}
+
+function whoopReserved(id) {
+  return db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_micros), 0) AS n FROM whoop_withdrawals
+       WHERE telegram_id = ? AND status = 'pending'`,
+    )
+    .get(id).n;
+}
+
+/* Referral bonuses are promotional credit, so they are not cashable to Whoop. */
+function withdrawableMicros(id) {
+  const user = findUser(id);
+  if (!user) return 0;
+  const referred = db
+    .prepare("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ?")
+    .get(id).n;
+  const bonus = (referred + (user.referred_by ? 1 : 0)) * REFERRAL_BONUS;
+  return Math.max(0, Math.max(0, user.credits_micros - bonus) - whoopReserved(id));
+}
+
+function whoopLink(id) {
+  return db.prepare("SELECT * FROM whoop_links WHERE telegram_id = ?").get(id);
+}
+
+function quoteFor(amount) {
+  const fee = whoopFeeMicros();
+  if (!amount || amount < MIN_WITHDRAWAL)
+    throw new ApiError(400, `Minimum withdrawal is $${(MIN_WITHDRAWAL / MICRO).toFixed(2)}.`);
+  if (amount % CENT !== 0)
+    throw new ApiError(400, "Amounts can have at most two decimal places.");
+  if (amount <= fee) throw new ApiError(400, "Amount does not cover the service fee.");
+  return { amount, fee, net: amount - fee };
+}
+
+class WhoopError extends Error {
+  constructor(message, { retriable, status, code }) {
+    super(message);
+    this.retriable = retriable;
+    this.status = status;
+    this.code = code;
+  }
+}
+
+async function whoopRequest(pathname, body) {
+  if (!whoopConfigured())
+    throw new WhoopError("Whoop Wallet is not configured.", { retriable: true, status: 503, code: "not_configured" });
+  let response;
+  try {
+    response = await fetch(`${whoopUrl()}${pathname}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-integration-key": whoopKey() },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(WHOOP_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new WhoopError(`Could not reach Whoop Wallet (${error.name}).`, { retriable: true, status: 0, code: "network" });
+  }
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {}
+  if (response.ok) return data;
+  /* 4xx answers about the request itself are final. Auth, rate-limit and 5xx answers
+     mean we do not know the outcome, so the withdrawal stays reserved and is retried. */
+  const retriable = response.status >= 500 || [401, 408, 423, 429].includes(response.status);
+  throw new WhoopError(data.error || `Whoop Wallet answered ${response.status}.`, {
+    retriable,
+    status: response.status,
+    code: data.code,
+  });
+}
+
+function publicWithdrawal(row) {
+  return {
+    id: row.id,
+    status: row.status,
+    amount: row.amount_micros / MICRO,
+    fee: row.fee_micros / MICRO,
+    receive: row.net_micros / MICRO,
+    destination: `@${row.whoop_username}`,
+    whoopTxId: row.whoop_tx_id,
+    error: row.status === "failed" ? row.failure_reason : null,
+    createdAt: `${row.created_at.replace(" ", "T")}Z`,
+    completedAt: row.completed_at ? `${row.completed_at.replace(" ", "T")}Z` : null,
+  };
+}
+
+/* Sends one reserved withdrawal to Whoop and settles it. Safe to call repeatedly:
+   Whoop credits at most once per reference, and the settle step runs only while pending. */
+async function attemptPayout(id) {
+  if (inflight.has(id)) return;
+  inflight.add(id);
+  try {
+    const row = db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(id);
+    if (!row || row.status !== "pending") return;
+    db.prepare(
+      "UPDATE whoop_withdrawals SET attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(id);
+    let result;
+    try {
+      result = await whoopRequest("/api/integrations/phygitals/credit", {
+        telegramId: Number(row.telegram_id),
+        amountCents: row.net_micros / CENT,
+        reference: `phygitals:${row.id}`,
+        note: "Withdrawal from Phygitals",
+      });
+    } catch (error) {
+      if (!(error instanceof WhoopError) || error.retriable) {
+        db.prepare("UPDATE whoop_withdrawals SET last_error = ? WHERE id = ?").run(
+          String(error.message).slice(0, 300),
+          id,
+        );
+        audit("system", "whoop_payout_retry_later", id, { error: error.message, status: error.status });
+        return;
+      }
+      inTransaction(() => {
+        const changed = db
+          .prepare(
+            `UPDATE whoop_withdrawals SET status = 'failed', failure_reason = ?,
+               updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`,
+          )
+          .run(error.message.slice(0, 300), id);
+        if (changed.changes) audit("system", "whoop_withdrawal_failed", id, { reason: error.message, code: error.code });
+      });
+      return;
+    }
+    inTransaction(() => {
+      const changed = db
+        .prepare(
+          `UPDATE whoop_withdrawals SET status = 'completed', whoop_tx_id = ?, last_error = NULL,
+             updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND status = 'pending'`,
+        )
+        .run(String(result.id || ""), id);
+      if (!changed.changes) return;
+      const user = findUser(row.telegram_id);
+      const deducted = Math.min(user.credits_micros, row.amount_micros);
+      db.prepare("UPDATE users SET credits_micros = credits_micros - ? WHERE telegram_id = ?").run(
+        deducted,
+        row.telegram_id,
+      );
+      const insert = db.prepare(
+        "INSERT INTO ledger (withdrawal_id, telegram_id, kind, amount_micros) VALUES (?, ?, ?, ?)",
+      );
+      insert.run(id, row.telegram_id, "whoop_withdrawal", row.net_micros);
+      if (row.fee_micros > 0) insert.run(id, row.telegram_id, "service_fee", row.fee_micros);
+      audit("system", "whoop_withdrawal_completed", id, {
+        whoopTxId: result.id,
+        duplicate: !!result.duplicate,
+        shortfall: row.amount_micros - deducted,
+      });
+    });
+  } finally {
+    inflight.delete(id);
+  }
+}
+
+async function reconcilePending({ olderThanSeconds = 20, limit = 20 } = {}) {
+  const rows = db
+    .prepare(
+      `SELECT id FROM whoop_withdrawals WHERE status = 'pending'
+       AND updated_at <= datetime('now', ?) ORDER BY created_at LIMIT ?`,
+    )
+    .all(`-${olderThanSeconds} seconds`, limit);
+  for (const row of rows) await attemptPayout(row.id);
+  return rows.length;
 }
 
 const app = express();
@@ -649,6 +906,217 @@ app.post("/webhook/helius", (req, res) => {
   res.json({ creditedTransfers: credited });
 });
 
+
+app.get("/wallet", (_req, res) => res.sendFile(path.join(ROOT, "wallet.html")));
+
+function whoopStatus(id) {
+  const link = whoopLink(id);
+  const pending = db
+    .prepare("SELECT * FROM whoop_withdrawals WHERE telegram_id = ? AND status = 'pending' ORDER BY created_at")
+    .all(id);
+  return {
+    configured: whoopConfigured(),
+    linked: !!link,
+    whoopUsername: link ? link.whoop_username : null,
+    available: withdrawableMicros(id) / MICRO,
+    fee: whoopFeeMicros() / MICRO,
+    min: MIN_WITHDRAWAL / MICRO,
+    pending: pending.map(publicWithdrawal),
+  };
+}
+
+app.get("/api/whoop/status", auth, (req, res) => {
+  inTransaction(() => ensureUser(req.telegram));
+  res.json(whoopStatus(req.telegram.id));
+});
+
+app.post("/api/whoop/link", auth, async (req, res) => {
+  rateLimit(`whoop-link:${req.telegram.id}`, 10, 10 * 60 * 1000);
+  inTransaction(() => ensureUser(req.telegram));
+  const code = typeof req.body?.code === "string" ? req.body.code.slice(0, 20) : "";
+  if (!code) throw new ApiError(400, "Enter the link code from Whoop Wallet.");
+  let whoop;
+  try {
+    whoop = await whoopRequest("/api/integrations/phygitals/verify-link", { code });
+  } catch (error) {
+    if (error instanceof WhoopError && !error.retriable && error.status !== 0)
+      throw new ApiError(400, "That link code is invalid or has expired.");
+    throw new ApiError(502, "Could not reach Whoop Wallet. Try again shortly.");
+  }
+  if (String(whoop.telegramId) !== req.telegram.id)
+    throw new ApiError(403, "That Whoop Wallet belongs to a different Telegram account.");
+  inTransaction(() => {
+    const current = whoopLink(req.telegram.id);
+    if (current && current.whoop_username !== whoop.username && whoopReserved(req.telegram.id) > 0)
+      throw new ApiError(409, "Wait for your pending withdrawal to finish before changing wallets.");
+    db.prepare(
+      `INSERT INTO whoop_links (telegram_id, whoop_username, whoop_name) VALUES (?, ?, ?)
+       ON CONFLICT(telegram_id) DO UPDATE SET whoop_username = excluded.whoop_username,
+         whoop_name = excluded.whoop_name, linked_at = CURRENT_TIMESTAMP`,
+    ).run(req.telegram.id, String(whoop.username), whoop.name ? String(whoop.name).slice(0, 60) : null);
+    audit(`user:${req.telegram.id}`, "whoop_linked", req.telegram.id, { whoopUsername: whoop.username });
+  });
+  res.json(whoopStatus(req.telegram.id));
+});
+
+app.post("/api/whoop/unlink", auth, (req, res) => {
+  inTransaction(() => {
+    if (whoopReserved(req.telegram.id) > 0)
+      throw new ApiError(409, "Wait for your pending withdrawal to finish before disconnecting.");
+    const removed = db.prepare("DELETE FROM whoop_links WHERE telegram_id = ?").run(req.telegram.id);
+    if (removed.changes) audit(`user:${req.telegram.id}`, "whoop_unlinked", req.telegram.id);
+  });
+  res.json(whoopStatus(req.telegram.id));
+});
+
+app.get("/api/whoop/quote", auth, (req, res) => {
+  const link = whoopLink(req.telegram.id);
+  if (!link) throw new ApiError(409, "Connect your Whoop Wallet first.");
+  const amount = toMicros(req.query.amount);
+  if (!amount) throw new ApiError(400, "Enter a valid amount.");
+  const quote = quoteFor(amount);
+  if (quote.amount > withdrawableMicros(req.telegram.id))
+    throw new ApiError(400, "Insufficient available balance.");
+  res.json({
+    destination: `@${link.whoop_username}`,
+    amount: quote.amount / MICRO,
+    fee: quote.fee / MICRO,
+    receive: quote.net / MICRO,
+  });
+});
+
+app.post("/api/whoop/withdraw", auth, async (req, res) => {
+  const { amount: rawAmount, idempotencyKey, confirm, expectedFee } = req.body || {};
+  if (confirm !== true) throw new ApiError(400, "Confirm the withdrawal to continue.");
+  if (typeof idempotencyKey !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(idempotencyKey))
+    throw new ApiError(400, "A valid idempotencyKey is required.");
+  rateLimit(`whoop-withdraw:${req.telegram.id}`, 20, 10 * 60 * 1000);
+  const amount = toMicros(rawAmount);
+  if (!amount) throw new ApiError(400, "Enter a valid amount.");
+
+  const row = inTransaction(() => {
+    const existing = db
+      .prepare("SELECT * FROM whoop_withdrawals WHERE telegram_id = ? AND idempotency_key = ?")
+      .get(req.telegram.id, idempotencyKey);
+    if (existing) {
+      if (existing.amount_micros !== amount)
+        throw new ApiError(409, "That request ID was already used for a different amount.");
+      return existing;
+    }
+    const link = whoopLink(req.telegram.id);
+    if (!link) throw new ApiError(409, "Connect your Whoop Wallet first.");
+    const quote = quoteFor(amount);
+    if (toMicros(String(expectedFee)) !== quote.fee && !(expectedFee === 0 && quote.fee === 0))
+      throw new ApiError(409, "The service fee changed. Review the withdrawal and confirm again.");
+    if (quote.amount > withdrawableMicros(req.telegram.id))
+      throw new ApiError(400, "Insufficient available balance.");
+    const id = crypto.randomUUID();
+    db.prepare(
+      `INSERT INTO whoop_withdrawals
+        (id, telegram_id, whoop_username, idempotency_key, amount_micros, fee_micros, net_micros)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, req.telegram.id, link.whoop_username, idempotencyKey, quote.amount, quote.fee, quote.net);
+    audit(`user:${req.telegram.id}`, "whoop_withdrawal_reserved", id, {
+      amount: quote.amount,
+      fee: quote.fee,
+      destination: link.whoop_username,
+    });
+    return db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(id);
+  });
+
+  await attemptPayout(row.id);
+  const latest = db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(row.id);
+  const status = latest.status === "completed" ? 200 : latest.status === "failed" ? 422 : 202;
+  res.status(status).json(publicWithdrawal(latest));
+});
+
+app.get("/api/whoop/withdrawals", auth, (req, res) => {
+  const rows = db
+    .prepare("SELECT * FROM whoop_withdrawals WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 100")
+    .all(req.telegram.id);
+  res.json({ withdrawals: rows.map(publicWithdrawal) });
+});
+
+app.get("/api/whoop/withdrawals/:id", auth, (req, res) => {
+  const row = db
+    .prepare("SELECT * FROM whoop_withdrawals WHERE id = ? AND telegram_id = ?")
+    .get(req.params.id, req.telegram.id);
+  if (!row) throw new ApiError(404, "Withdrawal not found.");
+  res.json(publicWithdrawal(row));
+});
+
+app.get("/admin/whoop-withdrawals", adminAuth, (req, res) => {
+  const status = ["pending", "completed", "failed"].includes(req.query.status) ? req.query.status : null;
+  const rows = db
+    .prepare(
+      `SELECT * FROM whoop_withdrawals ${status ? "WHERE status = ?" : ""} ORDER BY created_at DESC LIMIT 500`,
+    )
+    .all(...(status ? [status] : []));
+  res.json({
+    withdrawals: rows.map((row) => ({
+      ...publicWithdrawal(row),
+      telegramId: row.telegram_id,
+      attempts: row.attempts,
+      lastError: row.last_error,
+      reference: `phygitals:${row.id}`,
+    })),
+  });
+});
+
+app.get("/admin/whoop-summary", adminAuth, (_req, res) => {
+  const by = (status) =>
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n, COALESCE(SUM(amount_micros), 0) AS amount, COALESCE(SUM(net_micros), 0) AS net
+         FROM whoop_withdrawals WHERE status = ?`,
+      )
+      .get(status);
+  const done = by("completed");
+  const fees = db
+    .prepare("SELECT COALESCE(SUM(amount_micros), 0) AS n FROM ledger WHERE kind = 'service_fee'")
+    .get().n;
+  res.json({
+    completed: done.n,
+    volume: done.amount / MICRO,
+    sentToWhoop: done.net / MICRO,
+    feesCollected: fees / MICRO,
+    pending: by("pending").n,
+    pendingAmount: by("pending").amount / MICRO,
+    failed: by("failed").n,
+    currentFee: whoopFeeMicros() / MICRO,
+  });
+});
+
+app.post("/admin/whoop-withdrawals/:id/retry", adminAuth, async (req, res) => {
+  const row = db.prepare("SELECT status FROM whoop_withdrawals WHERE id = ?").get(req.params.id);
+  if (!row) throw new ApiError(404, "Withdrawal not found.");
+  if (row.status !== "pending") throw new ApiError(409, "Only pending withdrawals can be retried.");
+  audit("admin", "whoop_withdrawal_retry", req.params.id);
+  await attemptPayout(req.params.id);
+  res.json(publicWithdrawal(db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(req.params.id)));
+});
+
+app.post("/admin/settings/whoop-fee", adminAuth, (req, res) => {
+  const rawFee = req.body?.fee;
+  const fee = Number(rawFee) === 0 && rawFee !== "" && rawFee !== null && rawFee !== undefined ? 0 : toMicros(rawFee);
+  if (fee === null || fee > MAX_WHOOP_FEE || fee % CENT !== 0)
+    throw new ApiError(400, `Fee must be between $0 and $${MAX_WHOOP_FEE / MICRO}, in whole cents.`);
+  const previous = whoopFeeMicros();
+  db.prepare(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+  ).run(WHOOP_FEE_KEY, String(fee));
+  audit("admin", "whoop_fee_changed", null, { from: previous, to: fee });
+  res.json({ fee: fee / MICRO });
+});
+
+app.get("/admin/audit", adminAuth, (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, 500);
+  res.json({
+    entries: db.prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?").all(limit),
+  });
+});
+
 app.use((error, req, res, _next) => {
   const status = error instanceof ApiError ? error.status : 500;
   if (status >= 500) console.error(`${req.method} ${req.path}:`, error);
@@ -658,6 +1126,9 @@ app.use((error, req, res, _next) => {
 });
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  setInterval(() => {
+    reconcilePending().catch((error) => console.error("Whoop reconcile failed:", error));
+  }, 30_000).unref();
   app.listen(PORT, () => {
     console.log(`Phygitals server listening on port ${PORT}`);
     if (!BOT_TOKEN) console.warn("BOT_TOKEN is not set; Telegram API requests will be rejected.");
@@ -667,4 +1138,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   });
 }
 
-export { app, db };
+export { app, db, reconcilePending, attemptPayout };
