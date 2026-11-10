@@ -43,8 +43,17 @@ const CENT = MICRO / 100;
 const CARD_BUYBACK = Number(process.env.CARD_BUYBACK || 0.9);
 const MIN_HOUSE_EDGE = Number(process.env.MIN_HOUSE_EDGE ?? 0.05);
 const PACKS = loadPacks();
+/* Owner override: sell packs even when their average payout is above the price.
+   Set ALLOW_UNSAFE_ODDS=1 in .env. The prize pool is not changed. */
+const ALLOW_UNSAFE_ODDS = /^(1|true|yes)$/i.test(process.env.ALLOW_UNSAFE_ODDS || "");
 const PACK_STATUS = new Map(
-  PACKS.map((pack) => [pack.id, packStatus(pack, { buyback: CARD_BUYBACK, minEdge: MIN_HOUSE_EDGE })]),
+  PACKS.map((pack) => {
+    const status = packStatus(pack, { buyback: CARD_BUYBACK, minEdge: MIN_HOUSE_EDGE });
+    return [
+      pack.id,
+      ALLOW_UNSAFE_ODDS && !status.available ? { ...status, available: true, unsafe: true } : status,
+    ];
+  }),
 );
 const WHOOP_TIMEOUT_MS = 8000;
 const WHOOP_FEE_KEY = "whoop_withdrawal_fee_micros";
@@ -1358,7 +1367,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     for (const pack of PACKS) {
       const s = PACK_STATUS.get(pack.id);
       console.log(
-        s.available
+        s.unsafe
+          ? `Pack ${pack.id}: ON (UNSAFE OVERRIDE) price $${pack.price} but average payout is $${s.expectedPayout}`
+          : s.available
           ? `Pack ${pack.id}: ON  price $${pack.price}, average payout $${s.expectedPayout}`
           : `Pack ${pack.id}: OFF ${s.reason}`,
       );
