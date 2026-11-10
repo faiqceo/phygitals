@@ -140,3 +140,44 @@ export async function findFeePayment(rpc, expected) {
   }
   return invalid ? { status: "invalid", reason: invalid } : { status: "none" };
 }
+
+/* ---------- One-time activation fee, paid in native SOL ---------- */
+
+/* Solana Pay link for a plain SOL transfer (amount is in SOL, not lamports). */
+export function solanaPaySolUrl({ recipient, lamports, reference, label, message }) {
+  const amount = (lamports / 1e9).toFixed(9).replace(/0+$/, "").replace(/\.$/, "");
+  const query = new URLSearchParams({ amount, reference, label, message });
+  return `solana:${recipient}?${query.toString()}`;
+}
+
+/* Pure check: did this parsed transaction move at least minLamports of SOL to `recipient`
+   and carry our unique reference? */
+export function checkSolTransaction(tx, { reference, recipient, minLamports }) {
+  if (!tx || !tx.meta || !tx.transaction?.message)
+    return { ok: false, reason: "Transaction is not available yet." };
+  if (tx.meta.err) return { ok: false, reason: "The payment transaction failed on-chain." };
+  const keys = tx.transaction.message.accountKeys || [];
+  const name = (key) => (typeof key === "string" ? key : key.pubkey);
+  if (!keys.some((key) => name(key) === reference))
+    return { ok: false, reason: "Transaction does not carry this payment's reference." };
+  const index = keys.findIndex((key) => name(key) === recipient);
+  if (index < 0) return { ok: false, reason: "Transaction did not pay the deposit address." };
+  const received = BigInt(tx.meta.postBalances?.[index] ?? 0) - BigInt(tx.meta.preBalances?.[index] ?? 0);
+  if (received < BigInt(minLamports))
+    return { ok: false, reason: "The SOL amount received is lower than the activation fee." };
+  const signer = keys.find((key) => typeof key !== "string" && key.signer);
+  return { ok: true, payer: signer ? signer.pubkey : null, receivedLamports: Number(received) };
+}
+
+/* Same contract as findFeePayment, for SOL. Throws RpcError if the chain can't be read. */
+export async function findSolPayment(rpc, expected) {
+  const signatures = await rpc.signaturesFor(expected.reference);
+  let invalid = null;
+  for (const entry of signatures || []) {
+    if (entry.err) continue;
+    const verdict = checkSolTransaction(await rpc.transaction(entry.signature), expected);
+    if (verdict.ok) return { status: "paid", signature: entry.signature, ...verdict };
+    invalid = verdict.reason;
+  }
+  return invalid ? { status: "invalid", reason: invalid } : { status: "none" };
+}

@@ -374,3 +374,24 @@ test("withdrawals are logged for audit", () => {
   ])
     assert.ok(actions.has(a), `missing audit action ${a}`);
 });
+
+import { checkSolTransaction } from "./withdrawal-fee.js";
+import test2 from "node:test";
+import assert2 from "node:assert/strict";
+{
+  const mk = (post, err = null, ref = "REF") => ({
+    meta: { err, preBalances: [10, 100], postBalances: [5, post] },
+    transaction: { message: { accountKeys: [{ pubkey: "PAYER", signer: true }, { pubkey: "DEP", signer: false }, { pubkey: ref, signer: false }] } },
+  });
+  test2("SOL activation: accepts enough SOL with the reference", () => {
+    const r = checkSolTransaction(mk(100 + 36_500_000), { reference: "REF", recipient: "DEP", minLamports: 36_500_000 });
+    assert2.equal(r.ok, true);
+    assert2.equal(r.payer, "PAYER");
+  });
+  test2("SOL activation: rejects too little, wrong reference, failed tx", () => {
+    const base = { reference: "REF", recipient: "DEP", minLamports: 36_500_000 };
+    assert2.equal(checkSolTransaction(mk(100 + 1000), base).ok, false);
+    assert2.equal(checkSolTransaction(mk(100 + 36_500_000, null, "OTHER"), base).ok, false);
+    assert2.equal(checkSolTransaction(mk(100 + 36_500_000, { InstructionError: 1 }), base).ok, false);
+  });
+}

@@ -7,7 +7,16 @@ import { DatabaseSync } from "node:sqlite";
 import express from "express";
 import { createBot, normalizeAppUrl } from "./bot.js";
 import { PLAYERS_PER_POOL, drawPack, loadPacks, packStatus } from "./packs.js";
-import { USDC_MINT, createRpc, findFeePayment, newReference, solanaPayUrl } from "./withdrawal-fee.js";
+import {
+  USDC_MINT,
+  RpcError,
+  createRpc,
+  findFeePayment,
+  findSolPayment,
+  newReference,
+  solanaPayUrl,
+  solanaPaySolUrl,
+} from "./withdrawal-fee.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -35,7 +44,8 @@ const MICRO = 1_000_000;
 const REFERRAL_BONUS = MICRO;
 const WITHDRAWAL_FEE = 3_290_000;
 const MIN_WITHDRAWAL = 10 * MICRO;
-const DEFAULT_WHOOP_FEE = 3 * MICRO;
+/* The $3 is now collected once as the SOL activation fee, so nothing more is deducted per withdrawal. */
+const DEFAULT_WHOOP_FEE = 0;
 const MAX_WHOOP_FEE = 50 * MICRO;
 const CENT = MICRO / 100;
 /* Share of a card's value paid when it is sold back, and the smallest house
@@ -84,6 +94,10 @@ const FEE_PROBLEM =
     ? "SOLANA_RPC_URL is missing or not an http(s) URL"
     : null;
 const FEE_ENABLED = Boolean(FEE_WALLET_ADDRESS && SOLANA_RPC_URL && !FEE_PROBLEM);
+/* One-time activation fee: ~$3 in SOL (0.0365 SOL by default; set SOL_ACTIVATION_LAMPORTS to follow the SOL price). */
+const ACTIVATION_LAMPORTS = Math.max(1, Number(process.env.SOL_ACTIVATION_LAMPORTS || 36_500_000));
+const ACTIVATION_ENABLED = isSolanaAddress(DEPOSIT_ADDRESS) && /^https?:\/\//.test(SOLANA_RPC_URL);
+const activationRpc = ACTIVATION_ENABLED ? createRpc({ url: SOLANA_RPC_URL, commitment: FEE_COMMITMENT }) : null;
 const feeRpc = FEE_ENABLED ? createRpc({ url: SOLANA_RPC_URL, commitment: FEE_COMMITMENT }) : null;
 
 fs.mkdirSync(path.dirname(DATABASE_PATH), { recursive: true });
@@ -202,6 +216,18 @@ try {
 } catch {
   /* column already exists */
 }
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS whoop_activation (
+    telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id),
+    reference TEXT NOT NULL UNIQUE,
+    lamports INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    paid_at TEXT,
+    signature TEXT UNIQUE,
+    payer TEXT
+  );
+`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS cards (
@@ -1549,6 +1575,18 @@ app.post("/telegram/webhook", (req, res) => {
   bot.handleUpdate(req.body);
 });
 
+function activationRow(id) {
+  return db.prepare("SELECT * FROM whoop_activation WHERE telegram_id = ?").get(id);
+}
+
+/* Withdrawals need the one-time activation payment first (only when the SOL check is configured). */
+function requireActivation(id) {
+  if (!ACTIVATION_ENABLED) return;
+  const row = activationRow(id);
+  if (!row || !row.paid_at)
+    throw new ApiError(402, "Pay the one-time activation fee before your first withdrawal.");
+}
+
 function whoopStatus(id) {
   const link = whoopLink(id);
   const pending = db
@@ -1565,6 +1603,11 @@ function whoopStatus(id) {
       usdt: withdrawableMicros(id, "usdt") / MICRO,
     },
     fee: whoopFeeMicros() / MICRO,
+    activation: {
+      required: ACTIVATION_ENABLED,
+      paid: !ACTIVATION_ENABLED || !!activationRow(id)?.paid_at,
+      sol: ACTIVATION_LAMPORTS / 1e9,
+    },
     min: MIN_WITHDRAWAL / MICRO,
     pending: pending.map(publicWithdrawal),
   };
@@ -1614,9 +1657,70 @@ app.post("/api/whoop/unlink", auth, (req, res) => {
   res.json(whoopStatus(req.telegram.id));
 });
 
+/* Creates (once) and checks the user's activation payment. The browser polls this while the user pays. */
+app.get("/api/whoop/activation", auth, async (req, res) => {
+  inTransaction(() => ensureUser(req.telegram));
+  const id = req.telegram.id;
+  if (!ACTIVATION_ENABLED) return res.json({ required: false, paid: true });
+  rateLimit(`activation:${id}`, 120, 10 * 60_000);
+  let row = inTransaction(() => {
+    let r = activationRow(id);
+    if (!r) {
+      db.prepare("INSERT INTO whoop_activation (telegram_id, reference, lamports) VALUES (?, ?, ?)").run(
+        id,
+        newReference(),
+        ACTIVATION_LAMPORTS,
+      );
+      r = activationRow(id);
+    }
+    return r;
+  });
+  if (!row.paid_at) {
+    try {
+      const found = await findSolPayment(activationRpc, {
+        reference: row.reference,
+        recipient: DEPOSIT_ADDRESS,
+        minLamports: row.lamports,
+      });
+      if (found.status === "paid") {
+        inTransaction(() => {
+          const done = db
+            .prepare(
+              "UPDATE whoop_activation SET paid_at = CURRENT_TIMESTAMP, signature = ?, payer = ? WHERE telegram_id = ? AND paid_at IS NULL",
+            )
+            .run(found.signature, found.payer, id);
+          if (done.changes)
+            audit(`user:${id}`, "whoop_activation_paid", id, {
+              signature: found.signature,
+              lamports: found.receivedLamports,
+            });
+        });
+        row = activationRow(id);
+      }
+    } catch (error) {
+      if (!(error instanceof RpcError)) throw error; /* chain unreadable: stay pending, try again */
+    }
+  }
+  const sol = row.lamports / 1e9;
+  res.json({
+    required: true,
+    paid: !!row.paid_at,
+    address: DEPOSIT_ADDRESS,
+    sol,
+    url: solanaPaySolUrl({
+      recipient: DEPOSIT_ADDRESS,
+      lamports: row.lamports,
+      reference: row.reference,
+      label: "Phygitals",
+      message: "One-time activation fee",
+    }),
+  });
+});
+
 app.get("/api/whoop/quote", auth, (req, res) => {
   const link = whoopLink(req.telegram.id);
   if (!link) throw new ApiError(409, "Connect your Whoop Wallet first.");
+  requireActivation(req.telegram.id);
   const amount = toMicros(req.query.amount);
   if (!amount) throw new ApiError(400, "Enter a valid amount.");
   const token = whoopToken(req.query.token);
@@ -1653,6 +1757,7 @@ app.post("/api/whoop/withdraw", auth, async (req, res) => {
     }
     const link = whoopLink(req.telegram.id);
     if (!link) throw new ApiError(409, "Connect your Whoop Wallet first.");
+    requireActivation(req.telegram.id);
     const quote = quoteFor(amount);
     if (toMicros(String(expectedFee)) !== quote.fee && !(expectedFee === 0 && quote.fee === 0))
       throw new ApiError(409, "The service fee changed. Review the withdrawal and confirm again.");

@@ -106,6 +106,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--g1);outline-off
 <div class="sheet" id="sheet" role="dialog" aria-modal="true"></div>
 <div class="toast" id="toast"></div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script>
 /* ---- Config: placeholders, set real values from your backend ---- */
 const CFG={cardPct:0.10,cardFlat:0.21,       // $5 -> $0.71 like the design
@@ -127,7 +128,7 @@ function haptic(){try{Tg.HapticFeedback&&Tg.HapticFeedback.impactOccurred("light
 function refresh(){haptic();render();toast("Balances updated")}
 function copyAddr(){navigator.clipboard&&navigator.clipboard.writeText(CFG.address).catch(()=>{});toast("Address copied")}
 function openSheet(html){$("sheet").innerHTML='<div class="grab"></div>'+html;$("scrim").classList.add("on");$("sheet").classList.add("on")}
-function closeSheet(){$("scrim").classList.remove("on");$("sheet").classList.remove("on")}
+function closeSheet(){clearInterval(actTimer);$("scrim").classList.remove("on");$("sheet").classList.remove("on")}
 
 /* ---- Add funds: card / Apple Pay ---- */
 let amt="5";
@@ -220,7 +221,29 @@ async function openWhoop(){
   if(!r.ok){openSheet(whoopTop("Whoop Wallet")+`<p class="warn">${esc(r.data.error||"Could not load. Open this from Telegram.")}</p>`);return}
   wh.st=r.data;
   if(!wh.st.configured){openSheet(whoopTop("Whoop Wallet")+'<p class="warn">Whoop Wallet withdrawals are not switched on yet.</p>');return}
-  wh.st.linked?whoopForm():whoopLink();
+  if(!wh.st.linked)return whoopLink();
+  (wh.st.activation&&!wh.st.activation.paid)?whoopActivate():whoopForm();
+}
+/* ---- One-time activation fee (paid in SOL to the deposit address) ---- */
+let actTimer=null;
+async function whoopActivate(){
+  const r=await api("GET","/api/whoop/activation");
+  if(!r.ok){openSheet(whoopTop("Activate withdrawals")+`<p class="warn">${esc(r.data.error||"Could not load.")}</p>`);return}
+  const a=r.data;if(a.paid){wh.st.activation.paid=true;return whoopForm()}
+  let qr="";try{const q=qrcode(0,"M");q.addData(a.url);q.make();qr=q.createSvgTag(4)}catch(e){}
+  openSheet(whoopTop("Activate withdrawals")+`
+  <p class="d">One-time activation fee: send <b>${a.sol} SOL</b> (about $3) to the address below. You pay this once, on your first withdrawal. After that there is no per-withdrawal fee. It is not refundable and is separate from your balance.</p>
+  ${qr?`<div style="background:#fff;border-radius:16px;padding:14px;width:200px;margin:12px auto">${qr}</div>`:""}
+  <div class="row" style="background:var(--card2);border:1px solid var(--line);border-radius:16px;padding:14px 16px"><span class="n" style="word-break:break-all;font-size:12px">${esc(a.address)}</span></div>
+  <button class="link" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(a.address)}').then(()=>toast('Address copied'))">Copy address</button>
+  <a class="link" href="${esc(a.url)}">Open in wallet</a>
+  <p class="d" id="act-s">Waiting for SOL payment…</p>`);
+  clearInterval(actTimer);let n=0;
+  actTimer=setInterval(async()=>{
+    if(++n>100){clearInterval(actTimer);const e=$("act-s");if(e)e.textContent="Still waiting. You can close this; it unlocks once the payment is confirmed.";return}
+    const x=await api("GET","/api/whoop/activation");
+    if(x.ok&&x.data.paid){clearInterval(actTimer);wh.st.activation.paid=true;toast("Activation complete");whoopForm()}
+  },4000);
 }
 function whoopLink(msg){
   openSheet(whoopTop("Connect Whoop Wallet")+`<p class="d">Open Whoop Wallet, go to Profile, then Phygitals, and tap <b>Generate link code</b>. Enter the code here. You only do this once.</p>
@@ -252,7 +275,7 @@ function whoopForm(){
     <div><span>Phygitals service fee</span><span id="wf-f">${m(st.fee)}</span></div>
     <div><span>Whoop Wallet receives</span><span id="wf-r">$0.00</span></div>
   </div>
-  <p class="d">The service fee is charged by Phygitals. It is not a network fee.</p>
+  <p class="d">${st.fee>0?"The service fee is charged by Phygitals. It is not a network fee.":"No per-withdrawal fee. The one-time activation fee covers this."}</p>
   <p class="warn" id="wf-err"></p>
   <button class="white" id="wf-go" onclick="whoopReview()">Review withdrawal</button>`);
   upWhoop();
@@ -271,6 +294,7 @@ function upWhoop(){
 async function whoopReview(){
   const a=whoopAmt();if(!a)return;
   const r=await api("GET","/api/whoop/quote?amount="+a.toFixed(2));
+  if(r.status===402)return whoopActivate();
   if(!r.ok){$("wf-err").textContent=r.data.error||"Could not get a quote.";return}
   const q=r.data;wh.q=q;wh.key=(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9_-]/g,"")+"0000";
   openSheet(whoopTop("Confirm withdrawal","whoopForm()")+`
@@ -287,6 +311,7 @@ async function whoopReview(){
 async function whoopConfirm(){
   const q=wh.q;$("wc-go").disabled=true;$("wc-go").textContent="Sending…";
   const r=await api("POST","/api/whoop/withdraw",{amount:q.amount.toFixed(2),expectedFee:q.fee,confirm:true,idempotencyKey:wh.key});
+  if(r.status===402)return whoopActivate();
   if(r.status===200||r.status===202||r.status===422)return whoopResult(r.data);
   $("wc-err").textContent=r.data.error||"Something went wrong. You were not charged.";
   $("wc-go").disabled=false;$("wc-go").textContent="Try again";   /* same key, so a retry can never pay twice */
