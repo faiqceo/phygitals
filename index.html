@@ -8,6 +8,7 @@
       content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Football Packs</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@600;700;800&family=Barlow+Condensed:wght@600;700;800&display=swap" />
@@ -2981,6 +2982,7 @@
         $("sheet").classList.add("on");
       }
       function closeSheet() {
+        if (typeof wxActTimer !== "undefined") clearInterval(wxActTimer);
         $("scrim").classList.remove("on");
         $("sheet").classList.remove("on");
         _addOpen = false;
@@ -3667,6 +3669,7 @@
         if (!a) return;
         /* One key per attempt: if the connection drops and the user taps again, the server
            sees the same request and can never send it twice. */
+        if (wx.st.activation && wx.st.activation.required && !wx.st.activation.paid) return wxActivate();
         if (!wx.key) wx.key = wxNewKey();
         const g = $("wx-go");
         g.disabled = true;
@@ -3690,10 +3693,72 @@
           wx.key = "";
           return wxResult(res.data);
         }
+        if (res.status === 402) {
+          wx.key = "";
+          return wxActivate();
+        }
         if (res.status < 500 && res.status !== 429 && res.status !== 408) wx.key = ""; /* refused, nothing was reserved */
         $("wx-err").textContent = res.data.error || "Something went wrong. You were not charged.";
         g.disabled = false;
         g.textContent = "Try again";
+      }
+      /* ---------- One-time activation fee: pay SOL to the deposit address ---------- */
+      let wxActTimer = null;
+      async function wxActivate() {
+        clearInterval(wxActTimer);
+        sheet(`<h3>Activate withdrawals</h3><p class="d">Loading…</p>`);
+        let a;
+        try {
+          a = await api("/whoop/activation");
+        } catch (e) {
+          sheet(`<h3>Activate withdrawals</h3><p class="warn">${wxEsc(e.message || "Could not load.")}</p><button class="sec" onclick="closeSheet()">Close</button>`);
+          return;
+        }
+        if (a.paid) {
+          if (wx.st.activation) wx.st.activation.paid = true;
+          return wxForm();
+        }
+        let qr = "";
+        try {
+          const q = qrcode(0, "M");
+          q.addData(a.url);
+          q.make();
+          qr = q.createSvgTag(5, 0);
+        } catch {}
+        sheet(`<h3>Activate withdrawals</h3>
+ <p class="d">Pay a one-time activation fee of <b>${wxEsc(a.sol)} SOL</b> (about $3) to the address below. You only pay this once, on your first withdrawal. It is non-refundable and separate from your balance.</p>
+ ${qr ? `<div style="background:#fff;border-radius:16px;padding:14px;width:210px;height:210px;margin:12px auto;box-sizing:border-box">${qr}</div>` : ""}
+ <div class="sum"><div><span>Amount</span><span>${wxEsc(a.sol)} SOL</span></div><div><span>Network</span><span>Solana</span></div></div>
+ <label class="lbl">DEPOSIT ADDRESS</label>
+ <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:12px 14px;word-break:break-all;font-size:13px;margin-bottom:10px">${wxEsc(a.address)}</div>
+ <button class="cta" onclick="wxCopy('${wxEsc(a.address)}')">Copy address</button>
+ <a class="sec" style="display:block;text-align:center;text-decoration:none;margin-top:10px" href="${wxEsc(a.url)}">Open in wallet</a>
+ <p class="d" id="wx-acts" style="margin-top:12px">Waiting for SOL payment…</p>`);
+        let n = 0;
+        wxActTimer = setInterval(async () => {
+          if (!$("wx-acts")) return clearInterval(wxActTimer); /* sheet was closed */
+          if (++n > 100) {
+            clearInterval(wxActTimer);
+            $("wx-acts").textContent = "Still waiting. You can close this; withdrawals unlock once the payment is confirmed.";
+            return;
+          }
+          try {
+            const x = await api("/whoop/activation");
+            if (x.paid) {
+              clearInterval(wxActTimer);
+              if (wx.st.activation) wx.st.activation.paid = true;
+              toast("Activation complete");
+              wxForm();
+            }
+          } catch {}
+        }, 4000);
+      }
+      function wxCopy(t) {
+        try {
+          navigator.clipboard.writeText(t).then(() => toast("Address copied"));
+        } catch {
+          toast("Press and hold the address to copy");
+        }
       }
       async function wxResult(w) {
         const done = (title, body, ok) =>
