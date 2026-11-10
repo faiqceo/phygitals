@@ -635,6 +635,9 @@ function adminAuth(req, res, next) {
   next();
 }
 
+app.get("/healthz", (_req, res) =>
+  res.json({ ok: true, botToken: Boolean(BOT_TOKEN), appOrigin: APP_ORIGIN || null, telegramBot: bot.enabled }),
+);
 app.get("/", (_req, res) => res.sendFile(path.join(ROOT, "index.html")));
 app.use("/assets", express.static(path.join(ROOT, "assets")));
 
