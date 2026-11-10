@@ -1329,6 +1329,36 @@ app.post("/admin/settings/whoop-fee", adminAuth, (req, res) => {
   res.json({ fee: fee / MICRO });
 });
 
+/* Testing only: give a user pack credits. Disabled unless ALLOW_TEST_CREDITS=1.
+   Pack credits can be cashed out through Whoop, so leave this off in production. */
+app.post("/admin/credit", adminAuth, (req, res) => {
+  if (!/^(1|true|yes)$/i.test(process.env.ALLOW_TEST_CREDITS || ""))
+    throw new ApiError(403, "Test credits are disabled. Set ALLOW_TEST_CREDITS=1 to enable them.");
+  const amount = toMicros(req.body?.amount);
+  if (amount === null || amount > 100_000 * MICRO)
+    throw new ApiError(400, "Amount must be between $0.01 and $100,000.");
+
+  const { wallet, telegramId } = req.body || {};
+  let user = null;
+  if (typeof wallet === "string" && wallet)
+    user = db.prepare("SELECT * FROM users WHERE wallet = ?").get(wallet);
+  else if (telegramId) user = findUser(String(telegramId));
+  if (!user)
+    throw new ApiError(
+      404,
+      "No user found. The wallet must be linked in the app first (Add funds > link wallet), or pass telegramId instead.",
+    );
+
+  inTransaction(() => {
+    db.prepare("UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id = ?").run(
+      amount,
+      user.telegram_id,
+    );
+    audit("admin", "test_credit", user.telegram_id, { amount, wallet: user.wallet });
+  });
+  res.json({ telegramId: user.telegram_id, wallet: user.wallet, credits: publicProfile(user.telegram_id).credits });
+});
+
 app.get("/admin/audit", adminAuth, (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 100, 500);
   res.json({
