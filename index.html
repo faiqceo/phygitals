@@ -2601,6 +2601,9 @@
         opacity: 0.75;
         margin: -4px 0 12px;
       }
+      .nowhoop.under-input {
+        margin: 10px 0 4px;
+      }
       .nowhoop a {
         color: #3ee85a;
         font-weight: 600;
@@ -3606,9 +3609,9 @@
         sheet(`<h3>Connect Whoop Wallet</h3>
  <p class="d">Open Whoop Wallet, go to Profile, then Phygitals, and tap <b>Generate link code</b>. Enter the code here. You only do this once.</p>
  <label class="lbl" for="wx-code">LINK CODE</label><input class="field" id="wx-code" placeholder="ABCD-EFGH" autocapitalize="characters" autocomplete="off">
+ <p class="nowhoop under-input">Don't have Whoop? <a onclick="openWhoop()">Open Whoop &rarr;</a></p>
  <p class="warn" id="wx-err">${wxEsc(msg || "")}</p>
- <button class="cta" id="wx-go" onclick="wxDoLink()">Connect</button>
- <p class="nowhoop">Don't have Whoop? <a onclick="openWhoop()">Open Whoop &rarr;</a></p>`);
+ <button class="cta" id="wx-go" onclick="wxDoLink()">Connect</button>`);
       }
       async function wxDoLink() {
         const code = $("wx-code").value.trim();
