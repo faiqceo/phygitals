@@ -2562,6 +2562,17 @@
       .toast {
         z-index: 100;
       }
+      .nowhoop {
+        font-size: 13px;
+        opacity: 0.75;
+        margin: -4px 0 12px;
+      }
+      .nowhoop a {
+        color: #3ee85a;
+        font-weight: 600;
+        text-decoration: underline;
+        cursor: pointer;
+      }
       #wl .wl-err {
         color: #ff6b6b;
         font-size: 13px;
@@ -2720,6 +2731,7 @@
         apiBase: "/api",
         address: "",
         botLink: "https://t.me/Phygitalls_bot?startapp=",
+        whoopLink: "https://t.me/usewhoops_bot?startapp",
         code: "06bfad705af6",
       };
       const BALLIMG =
@@ -3403,9 +3415,13 @@
  <label class="lbl" for="w-tok">FROM</label><select class="field" id="w-tok" onchange="wd.tok=this.value;upWd()"><option value="usdc" ${wd.tok === "usdc" ? "selected" : ""}>USDC · Solana</option><option value="usdt" ${wd.tok === "usdt" ? "selected" : ""}>USDT · Solana</option></select>
  <label class="lbl" for="w-amt">AMOUNT</label><input class="field" id="w-amt" inputmode="decimal" placeholder="0.00" value="${bal > 0 ? bal.toFixed(2) : ""}" oninput="upWd()">
  <label class="lbl" for="w-to">YOUR WHOOP WALLET ADDRESS</label><input class="field" id="w-to" placeholder="Paste your Whoop address" oninput="upWd()">
+ <p class="nowhoop">Don't have Whoop? <a onclick="openWhoop()">Open Whoop &rarr;</a></p>
  <div class="sum"><div><span>Amount</span><span id="s-a">$0.00</span></div><div><span>Withdrawal fee</span><span id="s-f">$0.00</span></div><div><span>Arrives</span><span>Within ${CFG.holdHours} hours</span></div><div><span>You receive</span><span id="s-r">$0.00</span></div></div>
  <p class="warn" id="w-err"></p><button class="cta" id="w-go" onclick="doWd()">Confirm withdrawal</button>`);
         upWd();
+      }
+      function openWhoop() {
+        Tg.openTelegramLink(CFG.whoopLink);
       }
       function wdFee(a) {
         return a ? +Math.max(CFG.netFee, a * CFG.feePct).toFixed(2) : 0;
@@ -3477,11 +3493,11 @@
           try {
             result = JSON.parse(text);
           } catch {
-            throw new Error("The server returned an invalid response.");
+            throw new Error("The server returned an invalid response (HTTP " + r.status + "). The Phygitals server may not be running at this address.");
           }
         }
         if (!r.ok)
-          throw new Error(result?.error || "Request failed. Please try again.");
+          throw new Error(result?.error || "Request failed (HTTP " + r.status + "). Please try again.");
         return result;
       }
       async function linkWallet() {
