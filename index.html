@@ -3549,7 +3549,7 @@
       let wd = { tok: "usdc" };
       const short = (a) =>
         a.length > 16 ? a.slice(0, 6) + "..." + a.slice(-5) : a;
-      function openWd() {
+      function openWdOnChain() {
         const bal = S[wd.tok];
         sheet(`<h3>Withdraw to Whoop</h3><p class="d">Available: ${m(S.usdc)} USDC · ${m(S.usdt)} USDT</p>
  <label class="lbl" for="w-tok">FROM</label><select class="field" id="w-tok" onchange="wd.tok=this.value;upWd()"><option value="usdc" ${wd.tok === "usdc" ? "selected" : ""}>USDC · Solana</option><option value="usdt" ${wd.tok === "usdt" ? "selected" : ""}>USDT · Solana</option></select>
@@ -3560,6 +3560,166 @@
  <p class="warn" id="w-err"></p><button class="cta" id="w-go" onclick="doWd()">${CFG.sepFee ? "Continue" : "Confirm withdrawal"}</button>`);
         upWd();
         if (CFG.sepFee) resumeFeeWithdrawal();
+      }
+      /* ---------- Withdraw to Whoop Wallet: automatic, no review ----------
+         The server reserves the amount, credits the linked Whoop Wallet in the same request and
+         only then deducts the balance. Nothing here changes a balance locally. */
+      let wx = { st: null, tok: "usdc", amt: "", key: "" };
+      const wxEsc = (v) =>
+        String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+      const wxNewKey = () =>
+        (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9_-]/g, "") + "0000";
+      const wxAmt = () => {
+        const v = ($("wx-amt") ? $("wx-amt").value : "").trim();
+        return /^\d{1,7}(\.\d{1,2})?$/.test(v) ? +v : 0;
+      };
+      async function wxPost(path, body) {
+        const r = await fetch(CFG.apiBase + path, {
+          method: "POST",
+          headers: { "X-Telegram-Init-Data": Tg.initData || "", "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        let data = {};
+        try {
+          data = await r.json();
+        } catch {}
+        return { status: r.status, data };
+      }
+      async function openWd() {
+        wx.key = "";
+        sheet(`<h3>Withdraw to Whoop</h3><p class="d">Loading…</p>`);
+        try {
+          wx.st = await api("/whoop/status");
+        } catch (e) {
+          sheet(`<h3>Withdraw to Whoop</h3><p class="warn">${wxEsc(e.message || "Could not load. Open this from Telegram.")}</p><button class="sec" onclick="closeSheet()">Close</button>`);
+          return;
+        }
+        if (!wx.st.configured) {
+          sheet(`<h3>Withdraw to Whoop</h3><p class="warn">Whoop Wallet withdrawals are not switched on yet.</p><button class="sec" onclick="closeSheet()">Close</button>`);
+          return;
+        }
+        wx.st.linked ? wxForm() : wxLink();
+      }
+      function wxLink(msg) {
+        sheet(`<h3>Connect Whoop Wallet</h3>
+ <p class="d">Open Whoop Wallet, go to Profile, then Phygitals, and tap <b>Generate link code</b>. Enter the code here. You only do this once.</p>
+ <label class="lbl" for="wx-code">LINK CODE</label><input class="field" id="wx-code" placeholder="ABCD-EFGH" autocapitalize="characters" autocomplete="off">
+ <p class="warn" id="wx-err">${wxEsc(msg || "")}</p>
+ <button class="cta" id="wx-go" onclick="wxDoLink()">Connect</button>
+ <p class="nowhoop">Don't have Whoop? <a onclick="openWhoop()">Open Whoop &rarr;</a></p>`);
+      }
+      async function wxDoLink() {
+        const code = $("wx-code").value.trim();
+        if (!code) {
+          $("wx-err").textContent = "Enter the link code from Whoop Wallet.";
+          return;
+        }
+        $("wx-go").disabled = true;
+        try {
+          wx.st = await api("/whoop/link", { code });
+          toast("Whoop Wallet connected");
+          wxForm();
+        } catch (e) {
+          wxLink(e.message || "Could not connect.");
+        }
+      }
+      async function wxDisconnect() {
+        try {
+          wx.st = await api("/whoop/unlink", {});
+          toast("Disconnected");
+          wxLink();
+        } catch (e) {
+          $("wx-err").textContent = e.message || "Could not disconnect.";
+        }
+      }
+      function wxForm() {
+        const st = wx.st,
+          bal = (st.balances && st.balances[wx.tok]) || 0;
+        sheet(`<h3>Withdraw to Whoop</h3>
+ <div class="sum"><div><span>To</span><span>@${wxEsc(st.whoopUsername)} · Whoop Wallet</span></div></div>
+ <label class="lbl" for="wx-tok">FROM</label><select class="field" id="wx-tok" onchange="wx.tok=this.value;wx.amt='';wx.key='';wxForm()"><option value="usdc" ${wx.tok === "usdc" ? "selected" : ""}>USDC · ${m(st.balances.usdc)}</option><option value="usdt" ${wx.tok === "usdt" ? "selected" : ""}>USDT · ${m(st.balances.usdt)}</option></select>
+ <label class="lbl" for="wx-amt">AMOUNT</label><input class="field" id="wx-amt" inputmode="decimal" placeholder="0.00" value="${wxEsc(wx.amt || (bal > 0 ? bal.toFixed(2) : ""))}" oninput="wx.amt=this.value;wx.key='';wxUp()">
+ <div class="sum"><div><span>Amount</span><span id="wx-a">$0.00</span></div><div><span>Service fee</span><span id="wx-f">${m(st.fee)}</span></div><div><span>Whoop Wallet receives</span><span id="wx-r">$0.00</span></div><div><span>Arrives</span><span>Instantly</span></div></div>
+ <p class="warn" id="wx-err"></p>
+ <button class="cta" id="wx-go" onclick="wxConfirm()">Withdraw</button>
+ <button class="sec" style="margin-top:10px" onclick="wxDisconnect()">Disconnect this wallet</button>`);
+        wxUp();
+      }
+      function wxUp() {
+        const st = wx.st,
+          a = wxAmt(),
+          raw = $("wx-amt").value.trim(),
+          bal = (st.balances && st.balances[wx.tok]) || 0;
+        let e = "";
+        if (raw && !a) e = "Enter an amount with up to 2 decimals";
+        else if (a && a < st.min) e = "Minimum withdrawal is " + m(st.min);
+        else if (a > bal) e = "More than your balance (" + m(bal) + ")";
+        else if (a && a <= st.fee) e = "Amount doesn’t cover the service fee";
+        $("wx-a").textContent = m(a);
+        $("wx-r").textContent = m(Math.max(a - st.fee, 0));
+        $("wx-err").textContent = e;
+        const g = $("wx-go");
+        g.disabled = !a || !!e;
+        g.style.opacity = g.disabled ? 0.4 : 1;
+      }
+      async function wxConfirm() {
+        const a = wxAmt();
+        if (!a) return;
+        /* One key per attempt: if the connection drops and the user taps again, the server
+           sees the same request and can never send it twice. */
+        if (!wx.key) wx.key = wxNewKey();
+        const g = $("wx-go");
+        g.disabled = true;
+        g.textContent = "Sending…";
+        let res;
+        try {
+          res = await wxPost("/whoop/withdraw", {
+            amount: a.toFixed(2),
+            token: wx.tok,
+            expectedFee: wx.st.fee,
+            confirm: true,
+            idempotencyKey: wx.key,
+          });
+        } catch {
+          $("wx-err").textContent = "Connection problem. Tap again: it cannot send twice.";
+          g.disabled = false;
+          g.textContent = "Try again";
+          return;
+        }
+        if ([200, 202, 422].includes(res.status)) {
+          wx.key = "";
+          return wxResult(res.data);
+        }
+        if (res.status < 500 && res.status !== 429 && res.status !== 408) wx.key = ""; /* refused, nothing was reserved */
+        $("wx-err").textContent = res.data.error || "Something went wrong. You were not charged.";
+        g.disabled = false;
+        g.textContent = "Try again";
+      }
+      async function wxResult(w) {
+        const done = (title, body, ok) =>
+          sheet(`<div class="okv">${ok ? '<div class="chk">✓</div>' : ""}<h3>${title}</h3><p class="d">${body}</p><button class="cta" onclick="closeSheet()">Done</button></div>`);
+        if (w.status === "completed") {
+          hap("ok");
+          toast("Sent to Whoop Wallet");
+          done("Withdrawal complete", `${m(w.receive)} was added to ${wxEsc(w.destination)} on Whoop Wallet. It is already there.`, true);
+          await poll();
+          draw();
+          return;
+        }
+        if (w.status === "failed") {
+          done("Withdrawal failed", `${wxEsc(w.error || "Whoop Wallet declined the transfer.")} Your balance was not changed.`, false);
+          await poll();
+          return;
+        }
+        sheet(`<h3>Sending…</h3><p class="d">Waiting for Whoop Wallet to confirm. Your balance is held, not spent. You can close this and check back.</p>`);
+        for (let i = 0; i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const r = await api("/whoop/withdrawals/" + encodeURIComponent(w.id));
+            if (r.status !== "pending") return wxResult(r);
+          } catch {}
+        }
+        done("Still sending", "This is taking longer than usual. Your balance stays held until Whoop Wallet confirms, and it will finish automatically.", false);
       }
       function openWhoop() {
         Tg.openTelegramLink(CFG.whoopLink);

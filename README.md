@@ -38,6 +38,18 @@ How it works:
 
 The server still does not send the payout itself; that remains the manual step described above.
 
+## Withdraw to Whoop Wallet (automatic)
+
+The **Withdraw** button in the app sends winnings straight to the user's linked Whoop Wallet. There is no review step and no pasted address:
+
+1. The user links Whoop once with a one-time code (Whoop Wallet > Profile > Phygitals).
+2. They pick USDC or USDT, enter an amount and tap **Withdraw**.
+3. The server reserves the amount, credits Whoop in the same request, then deducts the balance. The money is already in Whoop when the request returns.
+
+`POST /api/whoop/withdraw` and `GET /api/whoop/quote` take an optional `token` (`usdc`, `usdt`, or `credits`, the default). Funds held by a pending Whoop withdrawal cannot also be requested on-chain. Set `WHOOP_API_URL` and `WHOOP_INTEGRATION_KEY` (must equal `PHYGITALS_INTEGRATION_KEY` on the Whoop server). If Whoop is unreachable the amount stays held and is retried every 30 seconds.
+
+The older on-chain route (`POST /api/withdraw`, manual payout and optional on-chain fee) still exists but the app no longer uses it.
+
 ## Telegram bot (/start)
 
 On startup the server uses `BOT_TOKEN` + `APP_URL` to register itself with Telegram automatically: it sets the webhook (`/telegram/webhook`, protected by a secret header), the `/start` command, the **Play** menu button that opens the Mini App, and the bot description. When someone sends `/start` the bot replies with a welcome message and an **Open Phygitals** button that launches the Mini App. `/start <referral code>` carries the code into the app. Edit the text in `welcomeText()` in `bot.js`.

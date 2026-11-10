@@ -196,6 +196,13 @@ db.exec(`
   );
 `);
 
+try {
+  /* Which balance a Whoop withdrawal is paid from: credits (default), usdc or usdt. */
+  db.exec("ALTER TABLE whoop_withdrawals ADD COLUMN token TEXT NOT NULL DEFAULT 'credits'");
+} catch {
+  /* column already exists */
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS cards (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,8 +406,8 @@ function publicProfile(id) {
     welcomed: Boolean(user.welcomed),
     code: user.referral_code,
     credits: (user.credits_micros - whoopReserved(id)) / MICRO,
-    usdc: (user.usdc_micros - (reserved.usdc || 0)) / MICRO,
-    usdt: (user.usdt_micros - (reserved.usdt || 0)) / MICRO,
+    usdc: (user.usdc_micros - (reserved.usdc || 0) - whoopReserved(id, "usdc")) / MICRO,
+    usdt: (user.usdt_micros - (reserved.usdt || 0) - whoopReserved(id, "usdt")) / MICRO,
     wallet: user.wallet,
     invited: referrals,
     earned: referrals,
@@ -513,7 +520,26 @@ function whoopFeeMicros() {
   return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_WHOOP_FEE;
 }
 
-function whoopReserved(id) {
+const WHOOP_TOKENS = { credits: "credits_micros", usdc: "usdc_micros", usdt: "usdt_micros" };
+const whoopToken = (value) => {
+  const token = value === undefined || value === null || value === "" ? "credits" : value;
+  if (!Object.hasOwn(WHOOP_TOKENS, token))
+    throw new ApiError(400, "Choose credits, USDC or USDT.");
+  return token;
+};
+
+/* Amount held for pending Whoop withdrawals paid from one balance. */
+function whoopReserved(id, token = "credits") {
+  return db
+    .prepare(
+      `SELECT COALESCE(SUM(amount_micros), 0) AS n FROM whoop_withdrawals
+       WHERE telegram_id = ? AND status = 'pending' AND token = ?`,
+    )
+    .get(id, token).n;
+}
+
+/* Pending Whoop withdrawals from any balance (used to block changing wallets). */
+function whoopReservedAll(id) {
   return db
     .prepare(
       `SELECT COALESCE(SUM(amount_micros), 0) AS n FROM whoop_withdrawals
@@ -523,9 +549,19 @@ function whoopReserved(id) {
 }
 
 /* Referral bonuses are promotional credit, so they are not cashable to Whoop. */
-function withdrawableMicros(id) {
+function withdrawableMicros(id, token = "credits") {
   const user = findUser(id);
   if (!user) return 0;
+  if (token !== "credits") {
+    /* Winnings: everything not already held by a pending on-chain request or Whoop withdrawal. */
+    const held = db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_micros), 0) AS n FROM withdrawal_requests
+         WHERE telegram_id = ? AND token = ? AND status = 'pending'`,
+      )
+      .get(id, token).n;
+    return Math.max(0, user[WHOOP_TOKENS[token]] - held - whoopReserved(id, token));
+  }
   const referred = db
     .prepare("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ?")
     .get(id).n;
@@ -589,6 +625,7 @@ function publicWithdrawal(row) {
   return {
     id: row.id,
     status: row.status,
+    token: row.token || "credits",
     amount: row.amount_micros / MICRO,
     fee: row.fee_micros / MICRO,
     receive: row.net_micros / MICRO,
@@ -649,8 +686,9 @@ async function attemptPayout(id) {
         .run(String(result.id || ""), id);
       if (!changed.changes) return;
       const user = findUser(row.telegram_id);
-      const deducted = Math.min(user.credits_micros, row.amount_micros);
-      db.prepare("UPDATE users SET credits_micros = credits_micros - ? WHERE telegram_id = ?").run(
+      const column = WHOOP_TOKENS[row.token] || "credits_micros";
+      const deducted = Math.min(user[column], row.amount_micros);
+      db.prepare(`UPDATE users SET ${column} = ${column} - ? WHERE telegram_id = ?`).run(
         deducted,
         row.telegram_id,
       );
@@ -1262,7 +1300,7 @@ app.post("/api/withdraw", auth, (req, res) => {
          WHERE telegram_id = ? AND token = ? AND status = 'pending'`,
       )
       .get(req.telegram.id, token).amount;
-    if (user[`${token}_micros`] - reserved < amount)
+    if (user[`${token}_micros`] - reserved - whoopReserved(req.telegram.id, token) < amount)
       throw new ApiError(400, "Insufficient available balance.");
     const id = crypto.randomUUID();
     if (FEE_ENABLED) {
@@ -1517,6 +1555,11 @@ function whoopStatus(id) {
     linked: !!link,
     whoopUsername: link ? link.whoop_username : null,
     available: withdrawableMicros(id) / MICRO,
+    balances: {
+      credits: withdrawableMicros(id, "credits") / MICRO,
+      usdc: withdrawableMicros(id, "usdc") / MICRO,
+      usdt: withdrawableMicros(id, "usdt") / MICRO,
+    },
     fee: whoopFeeMicros() / MICRO,
     min: MIN_WITHDRAWAL / MICRO,
     pending: pending.map(publicWithdrawal),
@@ -1545,7 +1588,7 @@ app.post("/api/whoop/link", auth, async (req, res) => {
     throw new ApiError(403, "That Whoop Wallet belongs to a different Telegram account.");
   inTransaction(() => {
     const current = whoopLink(req.telegram.id);
-    if (current && current.whoop_username !== whoop.username && whoopReserved(req.telegram.id) > 0)
+    if (current && current.whoop_username !== whoop.username && whoopReservedAll(req.telegram.id) > 0)
       throw new ApiError(409, "Wait for your pending withdrawal to finish before changing wallets.");
     db.prepare(
       `INSERT INTO whoop_links (telegram_id, whoop_username, whoop_name) VALUES (?, ?, ?)
@@ -1559,7 +1602,7 @@ app.post("/api/whoop/link", auth, async (req, res) => {
 
 app.post("/api/whoop/unlink", auth, (req, res) => {
   inTransaction(() => {
-    if (whoopReserved(req.telegram.id) > 0)
+    if (whoopReservedAll(req.telegram.id) > 0)
       throw new ApiError(409, "Wait for your pending withdrawal to finish before disconnecting.");
     const removed = db.prepare("DELETE FROM whoop_links WHERE telegram_id = ?").run(req.telegram.id);
     if (removed.changes) audit(`user:${req.telegram.id}`, "whoop_unlinked", req.telegram.id);
@@ -1572,10 +1615,12 @@ app.get("/api/whoop/quote", auth, (req, res) => {
   if (!link) throw new ApiError(409, "Connect your Whoop Wallet first.");
   const amount = toMicros(req.query.amount);
   if (!amount) throw new ApiError(400, "Enter a valid amount.");
+  const token = whoopToken(req.query.token);
   const quote = quoteFor(amount);
-  if (quote.amount > withdrawableMicros(req.telegram.id))
+  if (quote.amount > withdrawableMicros(req.telegram.id, token))
     throw new ApiError(400, "Insufficient available balance.");
   res.json({
+    token,
     destination: `@${link.whoop_username}`,
     amount: quote.amount / MICRO,
     fee: quote.fee / MICRO,
@@ -1591,14 +1636,15 @@ app.post("/api/whoop/withdraw", auth, async (req, res) => {
   rateLimit(`whoop-withdraw:${req.telegram.id}`, 20, 10 * 60 * 1000);
   const amount = toMicros(rawAmount);
   if (!amount) throw new ApiError(400, "Enter a valid amount.");
+  const token = whoopToken(req.body?.token);
 
   const row = inTransaction(() => {
     const existing = db
       .prepare("SELECT * FROM whoop_withdrawals WHERE telegram_id = ? AND idempotency_key = ?")
       .get(req.telegram.id, idempotencyKey);
     if (existing) {
-      if (existing.amount_micros !== amount)
-        throw new ApiError(409, "That request ID was already used for a different amount.");
+      if (existing.amount_micros !== amount || existing.token !== token)
+        throw new ApiError(409, "That request ID was already used for a different withdrawal.");
       return existing;
     }
     const link = whoopLink(req.telegram.id);
@@ -1606,15 +1652,16 @@ app.post("/api/whoop/withdraw", auth, async (req, res) => {
     const quote = quoteFor(amount);
     if (toMicros(String(expectedFee)) !== quote.fee && !(expectedFee === 0 && quote.fee === 0))
       throw new ApiError(409, "The service fee changed. Review the withdrawal and confirm again.");
-    if (quote.amount > withdrawableMicros(req.telegram.id))
+    if (quote.amount > withdrawableMicros(req.telegram.id, token))
       throw new ApiError(400, "Insufficient available balance.");
     const id = crypto.randomUUID();
     db.prepare(
       `INSERT INTO whoop_withdrawals
-        (id, telegram_id, whoop_username, idempotency_key, amount_micros, fee_micros, net_micros)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, req.telegram.id, link.whoop_username, idempotencyKey, quote.amount, quote.fee, quote.net);
+        (id, telegram_id, whoop_username, idempotency_key, amount_micros, fee_micros, net_micros, token)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, req.telegram.id, link.whoop_username, idempotencyKey, quote.amount, quote.fee, quote.net, token);
     audit(`user:${req.telegram.id}`, "whoop_withdrawal_reserved", id, {
+      token,
       amount: quote.amount,
       fee: quote.fee,
       destination: link.whoop_username,
