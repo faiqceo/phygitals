@@ -829,8 +829,9 @@ app.get("/api/cards", auth, (req, res) => {
 });
 
 app.post("/api/cards/sell", auth, (req, res) => {
-  if (req.body?.to !== "credits")
-    throw new ApiError(400, "Cards can only be sold back for pack credits right now.");
+  const to = req.body?.to;
+  if (to !== "credits" && to !== "usdc")
+    throw new ApiError(400, "Choose pack credits or USDC.");
   const cardId = Number(req.body?.cardId);
   if (!Number.isSafeInteger(cardId) || cardId <= 0)
     throw new ApiError(400, "Choose a card to sell.");
@@ -845,15 +846,17 @@ app.post("/api/cards/sell", auth, (req, res) => {
     db.prepare(
       "UPDATE cards SET status = 'sold', sold_micros = ?, sold_at = CURRENT_TIMESTAMP WHERE id = ?",
     ).run(payout, card.id);
-    db.prepare("UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id = ?").run(
+    const column = to === "usdc" ? "usdc_micros" : "credits_micros";
+    db.prepare(`UPDATE users SET ${column} = ${column} + ? WHERE telegram_id = ?`).run(
       payout,
       req.telegram.id,
     );
-    audit(`user:${req.telegram.id}`, "card_sold", String(card.id), { payout });
+    audit(`user:${req.telegram.id}`, "card_sold", String(card.id), { payout, to });
     return payout;
   });
 
-  res.json({ paid: paid / MICRO, credits: publicProfile(req.telegram.id).credits });
+  const profile = publicProfile(req.telegram.id);
+  res.json({ paid: paid / MICRO, credits: profile.credits, usdc: profile.usdc });
 });
 
 app.get("/api/deposit-address", auth, (_req, res) => {

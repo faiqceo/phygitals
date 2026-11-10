@@ -3116,19 +3116,18 @@
         draw();
       }
       async function sellCard(id, to) {
-        if (to !== "credits") {
-          toast("USDC payouts are not available yet. Sell back for pack credits");
-          return;
-        }
         try {
           const r = await api("/cards/sell", { cardId: id, to });
           S.cards = S.cards.filter((x) => x.id !== id);
           S.credits = r.credits;
+          if (typeof r.usdc === "number") S.usdc = r.usdc;
           closeSheet();
-          toast(`${m(r.paid)} added to pack credits`);
+          toast(`${m(r.paid)} added to ${to === "usdc" ? "USDC" : "pack credits"}`);
           draw();
+          return true;
         } catch (e) {
           toast(e.message || "Could not sell this card");
+          return false;
         }
       }
       function buy() {
@@ -3507,7 +3506,7 @@
       }
       function cashOut(id) {
         if (CFG.apiBase) {
-          toast("Card payouts are not connected to the server yet");
+          sellCard(id, "usdc").then((ok) => ok && openWd());
           return;
         }
         takeCard(id, "usdc");
