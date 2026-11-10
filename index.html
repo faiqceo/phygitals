@@ -45,6 +45,8 @@
         max-width: 480px;
         margin: 0 auto;
         min-height: 100vh;
+        min-height: 100dvh;
+        min-height: var(--tg-viewport-stable-height, 100dvh);
         padding: 14px 16px 120px;
         overflow-x: hidden;
       }
@@ -2816,6 +2818,18 @@
       };
       Tg.ready();
       Tg.expand();
+      /* Telegram polish: black header/background to match the app, and stop
+         swipe-down from closing the app while scrolling. Older clients lack some of these. */
+      for (const [fn, arg] of [
+        ["disableVerticalSwipes"],
+        ["setHeaderColor", "#000000"],
+        ["setBackgroundColor", "#000000"],
+        ["setBottomBarColor", "#000000"],
+      ]) {
+        try {
+          if (typeof Tg[fn] === "function") Tg[fn](arg);
+        } catch (e) {}
+      }
       const START =
         (Tg.initDataUnsafe && Tg.initDataUnsafe.start_param) ||
         new URLSearchParams(location.search).get("ref") ||

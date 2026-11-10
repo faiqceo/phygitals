@@ -6,9 +6,9 @@ import os from "node:os";
 import path from "node:path";
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "phygitals-test-"));
-process.env.BOT_TOKEN = "9123283968:AAG47fhN8_QL9L7ELuNGKjfOXzCPC4RVBXg";
-process.env.HELIUS_AUTH = "833dbda2-40a0-4af6-9602-dc162526b090t";
-process.env.ADMIN_TOKEN ="0b9c69bcb7af73a1aab5aa1d6d49febc79ce2b4cc32280d867d20dafe05fff05";
+process.env.BOT_TOKEN = "111111:test-token-not-a-real-bot-token";
+process.env.HELIUS_AUTH = "test-helius-secret";
+process.env.ADMIN_TOKEN = "test-admin-token-test-admin-token";
 process.env.DEPOSIT_ADDRESS = "Gv9xGpfbRAgCoUnQFpBikvqV2Q88zhAzeHeUBz7X7cvo";
 process.env.DATABASE_PATH = path.join(dataDir, "test.sqlite");
 
