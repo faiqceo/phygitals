@@ -1,3 +1,4 @@
+<!-- phygitals/README.md -->
 # Football Packs: Telegram Mini App
 
 ## Files
@@ -8,12 +9,12 @@
 ## Run the app and API
 1. Use Node.js 22.13 or newer, then run `npm install`.
 2. Copy `.env.example` to `.env` (or set the same variables in your host's dashboard). Set `APP_URL` to the public HTTPS URL of this server, `BOT_TOKEN` to the Telegram bot token, `DEPOSIT_ADDRESS` to a Solana address you control, `HELIUS_AUTH` to a private webhook secret, and optionally `APP_ORIGIN` and `ADMIN_TOKEN`.
-3. Run `npm start`. The server hosts the app at `/` and the API at `/api`. The SQLite database is stored in `data/phygitals.sqlite`; keep that directory on a persistent disk and back it up.
+3. Run `npm start`. The server hosts the app at `/` and the API at `/api`. Data is stored in PostgreSQL (for example Neon), so it survives restarts and redeploys. Set `DATABASE_URL` to your connection string (for Neon: `postgresql://user:password@ep-xxxx.region.aws.neon.tech/dbname?sslmode=require`); the tables are created automatically on first start. Use a separate database for each app.
 4. Configure a Helius webhook for the deposit address, USDC and USDT token transfers, and the URL `/webhook/helius`. Set its Authorization header to the same `HELIUS_AUTH` value. Configure the provider to send confirmed transactions.
 5. In Telegram, open **@BotFather** > `/newapp` (or Bot Settings > Menu Button) and set the Web App URL to the HTTPS URL serving this server.
 6. Set `botLink` in the `CFG` block to your real bot link, for example `https://t.me/YourBot/app?startapp=`.
 
-The backend verifies Telegram Web App data, stores Telegram accounts and $1 referral rewards in SQLite, and credits confirmed USDC/USDT deposits once per transaction. For a shared deposit address, users must link and sign with the wallet they send from; deposits from unlinked wallets are recorded as unclaimed until that wallet is linked. Deposits from exchanges generally cannot be matched because they use shared sender addresses. The server does not hold a signing key. Withdrawal requests are reserved in the account and require manual payout/review using the admin endpoint; configuring that endpoint does not itself send funds.
+The backend verifies Telegram Web App data, stores Telegram accounts and $1 referral rewards in PostgreSQL, and credits confirmed USDC/USDT deposits once per transaction. For a shared deposit address, users must link and sign with the wallet they send from; deposits from unlinked wallets are recorded as unclaimed until that wallet is linked. Deposits from exchanges generally cannot be matched because they use shared sender addresses. The server does not hold a signing key. Withdrawal requests are reserved in the account and require manual payout/review using the admin endpoint; configuring that endpoint does not itself send funds.
 
 With `ADMIN_TOKEN`, review pending withdrawals at `GET /admin/withdrawals` and unclaimed deposits at `GET /admin/unclaimed-deposits` using the `X-Admin-Token` header. After manually sending a payout, mark it complete with `POST /admin/withdrawals/{id}/review` and `{"action":"paid","reference":"<payout transaction id>"}`; use `{"action":"reject"}` to release a rejected request. Pack openings, card sales and card withdrawals remain disabled in the live API flow until they are server-authoritative.
 

@@ -1,10 +1,10 @@
 // phygitals/server.js
+// phygitals/server.js
 import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
 import express from "express";
+import { db, inTransaction, isUnique, DATABASE_SCHEMA } from "./db.js";
 import { createBot, normalizeAppUrl } from "./bot.js";
 import { PLAYERS_PER_POOL, drawPack, loadPacks, packStatus } from "./packs.js";
 import {
@@ -37,9 +37,6 @@ const bot = createBot({
   appUrl: APP_URL,
   webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || "",
 });
-const DATABASE_PATH = path.resolve(
-  process.env.DATABASE_PATH || path.join(ROOT, "data", "phygitals.sqlite"),
-);
 const MICRO = 1_000_000;
 const REFERRAL_BONUS = MICRO;
 const WITHDRAWAL_FEE = 3_290_000;
@@ -100,19 +97,19 @@ const ACTIVATION_ENABLED = isSolanaAddress(DEPOSIT_ADDRESS) && /^https?:\/\//.te
 const activationRpc = ACTIVATION_ENABLED ? createRpc({ url: SOLANA_RPC_URL, commitment: FEE_COMMITMENT }) : null;
 const feeRpc = FEE_ENABLED ? createRpc({ url: SOLANA_RPC_URL, commitment: FEE_COMMITMENT }) : null;
 
-fs.mkdirSync(path.dirname(DATABASE_PATH), { recursive: true });
-const db = new DatabaseSync(DATABASE_PATH);
-db.exec(`
-  PRAGMA foreign_keys = ON;
+async function initDb() {
+  if (DATABASE_SCHEMA) await db.exec(`CREATE SCHEMA IF NOT EXISTS "${DATABASE_SCHEMA}"`);
+  await db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     telegram_id TEXT PRIMARY KEY,
     username TEXT,
     referral_code TEXT NOT NULL UNIQUE,
     referred_by TEXT REFERENCES users(telegram_id),
-    credits_micros INTEGER NOT NULL DEFAULT 0,
-    usdc_micros INTEGER NOT NULL DEFAULT 0,
-    usdt_micros INTEGER NOT NULL DEFAULT 0,
+    credits_micros BIGINT NOT NULL DEFAULT 0,
+    usdc_micros BIGINT NOT NULL DEFAULT 0,
+    usdt_micros BIGINT NOT NULL DEFAULT 0,
     wallet TEXT UNIQUE,
+    welcomed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS referrals (
@@ -124,14 +121,14 @@ db.exec(`
     telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id),
     address TEXT NOT NULL,
     nonce TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at BIGINT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS deposits (
     signature TEXT NOT NULL,
     transfer_index INTEGER NOT NULL,
     telegram_id TEXT NOT NULL REFERENCES users(telegram_id),
     token TEXT NOT NULL,
-    amount_micros INTEGER NOT NULL,
+    amount_micros BIGINT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (signature, transfer_index)
   );
@@ -140,7 +137,7 @@ db.exec(`
     transfer_index INTEGER NOT NULL,
     sender TEXT NOT NULL,
     token TEXT NOT NULL,
-    amount_micros INTEGER NOT NULL,
+    amount_micros BIGINT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (signature, transfer_index)
   );
@@ -149,10 +146,11 @@ db.exec(`
     telegram_id TEXT NOT NULL REFERENCES users(telegram_id),
     token TEXT NOT NULL CHECK (token IN ('usdc', 'usdt')),
     destination TEXT NOT NULL,
-    amount_micros INTEGER NOT NULL,
-    fee_micros INTEGER NOT NULL,
+    amount_micros BIGINT NOT NULL,
+    fee_micros BIGINT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
       CHECK (status IN ('pending', 'paid', 'rejected')),
+    stage TEXT NOT NULL DEFAULT 'queued',
     payout_reference TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     processed_at TEXT
@@ -175,9 +173,10 @@ db.exec(`
     telegram_id TEXT NOT NULL REFERENCES users(telegram_id),
     whoop_username TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
-    amount_micros INTEGER NOT NULL CHECK (amount_micros > 0),
-    fee_micros INTEGER NOT NULL CHECK (fee_micros >= 0),
-    net_micros INTEGER NOT NULL CHECK (net_micros > 0),
+    amount_micros BIGINT NOT NULL CHECK (amount_micros > 0),
+    fee_micros BIGINT NOT NULL CHECK (fee_micros >= 0),
+    net_micros BIGINT NOT NULL CHECK (net_micros > 0),
+    token TEXT NOT NULL DEFAULT 'credits',
     status TEXT NOT NULL DEFAULT 'pending'
       CHECK (status IN ('pending', 'completed', 'failed')),
     whoop_tx_id TEXT,
@@ -192,68 +191,48 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS whoop_withdrawals_status
     ON whoop_withdrawals(status, updated_at);
   CREATE TABLE IF NOT EXISTS ledger (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     withdrawal_id TEXT NOT NULL REFERENCES whoop_withdrawals(id),
     telegram_id TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('whoop_withdrawal', 'service_fee')),
-    amount_micros INTEGER NOT NULL,
+    amount_micros BIGINT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (withdrawal_id, kind)
   );
   CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     actor TEXT NOT NULL,
     action TEXT NOT NULL,
     ref TEXT,
     detail TEXT
   );
-`);
-
-try {
-  /* Which balance a Whoop withdrawal is paid from: credits (default), usdc or usdt. */
-  db.exec("ALTER TABLE whoop_withdrawals ADD COLUMN token TEXT NOT NULL DEFAULT 'credits'");
-} catch {
-  /* column already exists */
-}
-
-db.exec(`
   CREATE TABLE IF NOT EXISTS whoop_activation (
     telegram_id TEXT PRIMARY KEY REFERENCES users(telegram_id),
     reference TEXT NOT NULL UNIQUE,
-    lamports INTEGER NOT NULL,
+    lamports BIGINT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     paid_at TEXT,
     signature TEXT UNIQUE,
     payer TEXT
   );
-`);
-
-db.exec(`
   CREATE TABLE IF NOT EXISTS cards (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     telegram_id TEXT NOT NULL REFERENCES users(telegram_id),
     pack_id TEXT NOT NULL,
-    price_micros INTEGER NOT NULL,
-    value_micros INTEGER NOT NULL,
+    price_micros BIGINT NOT NULL,
+    value_micros BIGINT NOT NULL,
     odds_index INTEGER NOT NULL,
     player_idx INTEGER NOT NULL,
     elite INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'owned' CHECK (status IN ('owned', 'sold')),
-    sold_micros INTEGER,
+    sold_micros BIGINT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     sold_at TEXT
   );
   CREATE INDEX IF NOT EXISTS cards_owner ON cards(telegram_id, status);
-`);
-
-/* Withdrawal processing fee. A request waits in stage 'awaiting_fee' until its fee is
-   verified on-chain, then moves to 'queued', which is where the existing review flow
-   picks it up. Rows created before this feature are 'queued'. */
-if (!db.prepare("PRAGMA table_info(withdrawal_requests)").all().some((c) => c.name === "stage")) {
-  db.exec("ALTER TABLE withdrawal_requests ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'");
-}
-db.exec(`
+  /* Withdrawal processing fee. A request waits in stage 'awaiting_fee' until its fee is
+     verified on-chain, then moves to 'queued'. */
   CREATE TABLE IF NOT EXISTS withdrawal_fee_payments (
     id TEXT PRIMARY KEY,
     withdrawal_id TEXT NOT NULL UNIQUE REFERENCES withdrawal_requests(id),
@@ -261,43 +240,26 @@ db.exec(`
     reference TEXT NOT NULL UNIQUE,
     recipient TEXT NOT NULL,
     mint TEXT NOT NULL,
-    amount_micros INTEGER NOT NULL CHECK (amount_micros > 0),
+    amount_micros BIGINT NOT NULL CHECK (amount_micros > 0),
     status TEXT NOT NULL DEFAULT 'awaiting'
       CHECK (status IN ('awaiting', 'confirmed', 'expired', 'cancelled', 'refunded')),
     signature TEXT UNIQUE,
     payer TEXT,
     last_error TEXT,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    confirmed_at INTEGER,
-    closed_at INTEGER
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    confirmed_at BIGINT,
+    closed_at BIGINT
   );
   CREATE INDEX IF NOT EXISTS fee_payments_status ON withdrawal_fee_payments(status, closed_at);
 `);
-
-/* Migration: track whether a user has finished the welcome screen. Accounts that
-   already exist were created by signup/redeem, so they count as welcomed. */
-if (!db.prepare("PRAGMA table_info(users)").all().some((c) => c.name === "welcomed")) {
-  db.exec("ALTER TABLE users ADD COLUMN welcomed INTEGER NOT NULL DEFAULT 0");
-  db.exec("UPDATE users SET welcomed = 1");
 }
+await initDb();
 
 class ApiError extends Error {
   constructor(status, message) {
     super(message);
     this.status = status;
-  }
-}
-
-function inTransaction(fn) {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
   }
 }
 
@@ -376,41 +338,41 @@ function makeReferralCode() {
   return crypto.randomBytes(6).toString("hex");
 }
 
-function findUser(id) {
-  return db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(id);
+async function findUser(id) {
+  return await db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(id);
 }
 
-function ensureUser(telegram) {
-  let user = findUser(telegram.id);
+async function ensureUser(telegram) {
+  let user = await findUser(telegram.id);
   if (user) {
     if (telegram.username && telegram.username !== user.username) {
-      db.prepare("UPDATE users SET username = ? WHERE telegram_id = ?").run(
+      await db.prepare("UPDATE users SET username = ? WHERE telegram_id = ?").run(
         telegram.username,
         telegram.id,
       );
-      user = findUser(telegram.id);
+      user = await findUser(telegram.id);
     }
     return user;
   }
 
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = makeReferralCode();
-    try {
-      db.prepare(
-        "INSERT INTO users (telegram_id, username, referral_code) VALUES (?, ?, ?)",
-      ).run(telegram.id, telegram.username, code);
-      return findUser(telegram.id);
-    } catch (error) {
-      if (!String(error.message).includes("UNIQUE")) throw error;
-    }
+    /* ON CONFLICT DO NOTHING instead of catching an error: in Postgres an error would abort an
+       enclosing transaction. Nothing inserted means either a parallel request created this user
+       first, or the referral code collided; both are handled below. */
+    await db.prepare(
+      "INSERT INTO users (telegram_id, username, referral_code) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+    ).run(telegram.id, telegram.username, code);
+    user = await findUser(telegram.id);
+    if (user) return user;
   }
   throw new Error("Could not allocate a unique referral code");
 }
 
-function publicProfile(id) {
-  const user = findUser(id);
+async function publicProfile(id) {
+  const user = await findUser(id);
   if (!user) throw new ApiError(404, "Account not found. Sign in again.");
-  const pending = db
+  const pending = await db
     .prepare(
       `SELECT token, COALESCE(SUM(amount_micros), 0) AS reserved
        FROM withdrawal_requests WHERE telegram_id = ? AND status = 'pending'
@@ -418,11 +380,11 @@ function publicProfile(id) {
     )
     .all(id);
   const reserved = Object.fromEntries(pending.map((row) => [row.token, row.reserved]));
-  const referrals = db
+  const referrals = (await db
     .prepare("SELECT COUNT(*) AS count FROM referrals WHERE referrer_id = ?")
-    .get(id).count;
+    .get(id)).count;
   const referred = user.referred_by
-    ? db
+    ? await db
         .prepare("SELECT username, created_at FROM users WHERE telegram_id = ?")
         .get(user.referred_by)
     : null;
@@ -431,9 +393,9 @@ function publicProfile(id) {
     id: user.telegram_id,
     welcomed: Boolean(user.welcomed),
     code: user.referral_code,
-    credits: (user.credits_micros - whoopReserved(id)) / MICRO,
-    usdc: (user.usdc_micros - (reserved.usdc || 0) - whoopReserved(id, "usdc")) / MICRO,
-    usdt: (user.usdt_micros - (reserved.usdt || 0) - whoopReserved(id, "usdt")) / MICRO,
+    credits: (user.credits_micros - await whoopReserved(id)) / MICRO,
+    usdc: (user.usdc_micros - (reserved.usdc || 0) - await whoopReserved(id, "usdc")) / MICRO,
+    usdt: (user.usdt_micros - (reserved.usdt || 0) - await whoopReserved(id, "usdt")) / MICRO,
     wallet: user.wallet,
     invited: referrals,
     earned: referrals,
@@ -447,23 +409,23 @@ function publicProfile(id) {
   };
 }
 
-function attachReferral(userId, code) {
+async function attachReferral(userId, code) {
   if (typeof code !== "string" || !/^[a-f0-9]{12}$/i.test(code)) return false;
-  const user = findUser(userId);
+  const user = await findUser(userId);
   if (user.referred_by) return false;
-  const referrer = db
+  const referrer = await db
     .prepare("SELECT telegram_id FROM users WHERE lower(referral_code) = lower(?)")
     .get(code);
   if (!referrer || referrer.telegram_id === userId) return false;
 
-  db.prepare("UPDATE users SET referred_by = ? WHERE telegram_id = ?").run(
+  await db.prepare("UPDATE users SET referred_by = ? WHERE telegram_id = ?").run(
     referrer.telegram_id,
     userId,
   );
-  db.prepare(
+  await db.prepare(
     "INSERT INTO referrals (referred_id, referrer_id) VALUES (?, ?)",
   ).run(userId, referrer.telegram_id);
-  db.prepare(
+  await db.prepare(
     "UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id IN (?, ?)",
   ).run(REFERRAL_BONUS, referrer.telegram_id, userId);
   return true;
@@ -531,8 +493,8 @@ function rateLimit(key, max, windowMs) {
   rateHits.set(key, hits);
 }
 
-function audit(actor, action, ref, detail) {
-  db.prepare("INSERT INTO audit_log (actor, action, ref, detail) VALUES (?, ?, ?, ?)").run(
+async function audit(actor, action, ref, detail) {
+  await db.prepare("INSERT INTO audit_log (actor, action, ref, detail) VALUES (?, ?, ?, ?)").run(
     actor,
     action,
     ref ?? null,
@@ -540,8 +502,8 @@ function audit(actor, action, ref, detail) {
   );
 }
 
-function whoopFeeMicros() {
-  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(WHOOP_FEE_KEY);
+async function whoopFeeMicros() {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = ?").get(WHOOP_FEE_KEY);
   const value = row ? Number(row.value) : DEFAULT_WHOOP_FEE;
   return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_WHOOP_FEE;
 }
@@ -555,52 +517,56 @@ const whoopToken = (value) => {
 };
 
 /* Amount held for pending Whoop withdrawals paid from one balance. */
-function whoopReserved(id, token = "credits") {
-  return db
+async function whoopReserved(id, token = "credits") {
+  const row = await db
     .prepare(
       `SELECT COALESCE(SUM(amount_micros), 0) AS n FROM whoop_withdrawals
        WHERE telegram_id = ? AND status = 'pending' AND token = ?`,
     )
-    .get(id, token).n;
+    .get(id, token);
+  return row.n;
 }
 
 /* Pending Whoop withdrawals from any balance (used to block changing wallets). */
-function whoopReservedAll(id) {
-  return db
+async function whoopReservedAll(id) {
+  const row = await db
     .prepare(
       `SELECT COALESCE(SUM(amount_micros), 0) AS n FROM whoop_withdrawals
        WHERE telegram_id = ? AND status = 'pending'`,
     )
-    .get(id).n;
+    .get(id);
+  return row.n;
 }
 
 /* Referral bonuses are promotional credit, so they are not cashable to Whoop. */
-function withdrawableMicros(id, token = "credits") {
-  const user = findUser(id);
+async function withdrawableMicros(id, token = "credits") {
+  const user = await findUser(id);
   if (!user) return 0;
   if (token !== "credits") {
     /* Winnings: everything not already held by a pending on-chain request or Whoop withdrawal. */
-    const held = db
+    const heldRow = await db
       .prepare(
         `SELECT COALESCE(SUM(amount_micros), 0) AS n FROM withdrawal_requests
          WHERE telegram_id = ? AND token = ? AND status = 'pending'`,
       )
-      .get(id, token).n;
-    return Math.max(0, user[WHOOP_TOKENS[token]] - held - whoopReserved(id, token));
+      .get(id, token);
+    const held = heldRow.n;
+    return Math.max(0, user[WHOOP_TOKENS[token]] - held - await whoopReserved(id, token));
   }
-  const referred = db
+  const referredRow = await db
     .prepare("SELECT COUNT(*) AS n FROM referrals WHERE referrer_id = ?")
-    .get(id).n;
+    .get(id);
+  const referred = referredRow.n;
   const bonus = (referred + (user.referred_by ? 1 : 0)) * REFERRAL_BONUS;
-  return Math.max(0, Math.max(0, user.credits_micros - bonus) - whoopReserved(id));
+  return Math.max(0, Math.max(0, user.credits_micros - bonus) - await whoopReserved(id));
 }
 
-function whoopLink(id) {
-  return db.prepare("SELECT * FROM whoop_links WHERE telegram_id = ?").get(id);
+async function whoopLink(id) {
+  return await db.prepare("SELECT * FROM whoop_links WHERE telegram_id = ?").get(id);
 }
 
-function quoteFor(amount) {
-  const fee = whoopFeeMicros();
+async function quoteFor(amount) {
+  const fee = await whoopFeeMicros();
   if (!amount || amount < MIN_WITHDRAWAL)
     throw new ApiError(400, `Minimum withdrawal is $${(MIN_WITHDRAWAL / MICRO).toFixed(2)}.`);
   if (amount % CENT !== 0)
@@ -669,9 +635,9 @@ async function attemptPayout(id) {
   if (inflight.has(id)) return;
   inflight.add(id);
   try {
-    const row = db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(id);
+    const row = await db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(id);
     if (!row || row.status !== "pending") return;
-    db.prepare(
+    await db.prepare(
       "UPDATE whoop_withdrawals SET attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     ).run(id);
     let result;
@@ -684,26 +650,26 @@ async function attemptPayout(id) {
       });
     } catch (error) {
       if (!(error instanceof WhoopError) || error.retriable) {
-        db.prepare("UPDATE whoop_withdrawals SET last_error = ? WHERE id = ?").run(
+        await db.prepare("UPDATE whoop_withdrawals SET last_error = ? WHERE id = ?").run(
           String(error.message).slice(0, 300),
           id,
         );
-        audit("system", "whoop_payout_retry_later", id, { error: error.message, status: error.status });
+        await audit("system", "whoop_payout_retry_later", id, { error: error.message, status: error.status });
         return;
       }
-      inTransaction(() => {
-        const changed = db
+      await inTransaction(async () => {
+        const changed = await db
           .prepare(
             `UPDATE whoop_withdrawals SET status = 'failed', failure_reason = ?,
                updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`,
           )
           .run(error.message.slice(0, 300), id);
-        if (changed.changes) audit("system", "whoop_withdrawal_failed", id, { reason: error.message, code: error.code });
+        if (changed.changes) await audit("system", "whoop_withdrawal_failed", id, { reason: error.message, code: error.code });
       });
       return;
     }
-    inTransaction(() => {
-      const changed = db
+    await inTransaction(async () => {
+      const changed = await db
         .prepare(
           `UPDATE whoop_withdrawals SET status = 'completed', whoop_tx_id = ?, last_error = NULL,
              updated_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP
@@ -711,19 +677,19 @@ async function attemptPayout(id) {
         )
         .run(String(result.id || ""), id);
       if (!changed.changes) return;
-      const user = findUser(row.telegram_id);
+      const user = await findUser(row.telegram_id);
       const column = WHOOP_TOKENS[row.token] || "credits_micros";
       const deducted = Math.min(user[column], row.amount_micros);
-      db.prepare(`UPDATE users SET ${column} = ${column} - ? WHERE telegram_id = ?`).run(
+      await db.prepare(`UPDATE users SET ${column} = ${column} - ? WHERE telegram_id = ?`).run(
         deducted,
         row.telegram_id,
       );
       const insert = db.prepare(
         "INSERT INTO ledger (withdrawal_id, telegram_id, kind, amount_micros) VALUES (?, ?, ?, ?)",
       );
-      insert.run(id, row.telegram_id, "whoop_withdrawal", row.net_micros);
-      if (row.fee_micros > 0) insert.run(id, row.telegram_id, "service_fee", row.fee_micros);
-      audit("system", "whoop_withdrawal_completed", id, {
+      await insert.run(id, row.telegram_id, "whoop_withdrawal", row.net_micros);
+      if (row.fee_micros > 0) await insert.run(id, row.telegram_id, "service_fee", row.fee_micros);
+      await audit("system", "whoop_withdrawal_completed", id, {
         whoopTxId: result.id,
         duplicate: !!result.duplicate,
         shortfall: row.amount_micros - deducted,
@@ -735,12 +701,13 @@ async function attemptPayout(id) {
 }
 
 async function reconcilePending({ olderThanSeconds = 10, limit = 20 } = {}) {
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT id FROM whoop_withdrawals WHERE status = 'pending'
-       AND updated_at <= datetime('now', ?) ORDER BY created_at LIMIT ?`,
+       AND updated_at <= to_char(timezone('utc', now()) - make_interval(secs => ?), 'YYYY-MM-DD HH24:MI:SS')
+       ORDER BY created_at LIMIT ?`,
     )
-    .all(`-${olderThanSeconds} seconds`, limit);
+    .all(olderThanSeconds, limit);
   for (const row of rows) await attemptPayout(row.id);
   return rows.length;
 }
@@ -750,12 +717,12 @@ async function reconcilePending({ olderThanSeconds = 10, limit = 20 } = {}) {
 const feeChecking = new Set();
 const feeLastCheck = new Map();
 
-function feePaymentRow(id) {
-  return db.prepare("SELECT * FROM withdrawal_fee_payments WHERE id = ?").get(id);
+async function feePaymentRow(id) {
+  return await db.prepare("SELECT * FROM withdrawal_fee_payments WHERE id = ?").get(id);
 }
 
-function feePaymentFor(withdrawalId) {
-  return db.prepare("SELECT * FROM withdrawal_fee_payments WHERE withdrawal_id = ?").get(withdrawalId);
+async function feePaymentFor(withdrawalId) {
+  return await db.prepare("SELECT * FROM withdrawal_fee_payments WHERE withdrawal_id = ?").get(withdrawalId);
 }
 
 /* The state the app shows. It is derived from stored facts, never from the browser. */
@@ -803,21 +770,21 @@ function publicFeeWithdrawal(w, p) {
 }
 
 /* Closes a payment nobody paid and releases the reserved withdrawal. */
-function closeUnpaidFee(paymentId, status, actor) {
-  return inTransaction(() => {
-    const changed = db
+async function closeUnpaidFee(paymentId, status, actor) {
+  return inTransaction(async () => {
+    const changed = await db
       .prepare(
         `UPDATE withdrawal_fee_payments SET status = ?, closed_at = ?
          WHERE id = ? AND status = 'awaiting'`,
       )
       .run(status, Date.now(), paymentId);
     if (!changed.changes) return false;
-    const p = feePaymentRow(paymentId);
-    db.prepare(
+    const p = await feePaymentRow(paymentId);
+    await db.prepare(
       `UPDATE withdrawal_requests SET status = 'rejected', stage = 'cancelled', processed_at = CURRENT_TIMESTAMP
        WHERE id = ? AND status = 'pending' AND stage = 'awaiting_fee'`,
     ).run(p.withdrawal_id);
-    audit(actor, `withdrawal_fee_${status}`, p.withdrawal_id, { paymentId });
+    await audit(actor, `withdrawal_fee_${status}`, p.withdrawal_id, { paymentId });
     return true;
   });
 }
@@ -827,7 +794,7 @@ function closeUnpaidFee(paymentId, status, actor) {
    or unreachable lookup never marks anything paid. */
 async function checkFeePayment(paymentId) {
   if (!feeRpc || feeChecking.has(paymentId)) return;
-  const p = feePaymentRow(paymentId);
+  const p = await feePaymentRow(paymentId);
   if (!p) return;
   const open = p.status === "awaiting";
   const late =
@@ -849,26 +816,26 @@ async function checkFeePayment(paymentId) {
     } catch (error) {
       const message = String(error.message).slice(0, 200);
       if (p.last_error !== message) {
-        db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(message, p.id);
-        audit("system", "withdrawal_fee_check_failed", p.withdrawal_id, { error: message });
+        await db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(message, p.id);
+        await audit("system", "withdrawal_fee_check_failed", p.withdrawal_id, { error: message });
       }
       return;
     }
 
     if (found.status === "paid") {
       try {
-        inTransaction(() => {
-          const cur = feePaymentRow(p.id);
+        await inTransaction(async () => {
+          const cur = await feePaymentRow(p.id);
           if (cur.status === "awaiting") {
-            db.prepare(
+            await db.prepare(
               `UPDATE withdrawal_fee_payments SET status = 'confirmed', signature = ?, payer = ?,
                  confirmed_at = ?, last_error = NULL WHERE id = ? AND status = 'awaiting'`,
             ).run(found.signature, found.payer, Date.now(), p.id);
-            db.prepare(
+            await db.prepare(
               `UPDATE withdrawal_requests SET stage = 'queued'
                WHERE id = ? AND status = 'pending' AND stage = 'awaiting_fee'`,
             ).run(p.withdrawal_id);
-            audit("system", "withdrawal_fee_confirmed", p.withdrawal_id, {
+            await audit("system", "withdrawal_fee_confirmed", p.withdrawal_id, {
               signature: found.signature,
               payer: found.payer,
               receivedMicros: found.receivedMicros,
@@ -877,24 +844,24 @@ async function checkFeePayment(paymentId) {
           } else if ((cur.status === "expired" || cur.status === "cancelled") && !cur.signature) {
             /* Paid after the request was closed: the withdrawal no longer exists, so the
                fee goes back to the user's USDC balance instead of being kept. */
-            db.prepare(
+            await db.prepare(
               `UPDATE withdrawal_fee_payments SET status = 'refunded', signature = ?, payer = ?, last_error = NULL
                WHERE id = ? AND signature IS NULL`,
             ).run(found.signature, found.payer, p.id);
-            db.prepare("UPDATE users SET usdc_micros = usdc_micros + ? WHERE telegram_id = ?").run(
+            await db.prepare("UPDATE users SET usdc_micros = usdc_micros + ? WHERE telegram_id = ?").run(
               found.receivedMicros,
               p.telegram_id,
             );
-            audit("system", "withdrawal_fee_late_refunded", p.withdrawal_id, {
+            await audit("system", "withdrawal_fee_late_refunded", p.withdrawal_id, {
               signature: found.signature,
               receivedMicros: found.receivedMicros,
             });
           }
         });
       } catch (error) {
-        if (/UNIQUE/i.test(String(error.message))) {
-          audit("system", "withdrawal_fee_signature_reused", p.withdrawal_id, { signature: found.signature });
-          db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(
+        if (isUnique(error)) {
+          await audit("system", "withdrawal_fee_signature_reused", p.withdrawal_id, { signature: found.signature });
+          await db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(
             "That transaction was already used for another payment.",
             p.id,
           );
@@ -904,12 +871,12 @@ async function checkFeePayment(paymentId) {
     }
 
     if (open && Date.now() > p.expires_at) {
-      closeUnpaidFee(p.id, "expired", "system");
+      await closeUnpaidFee(p.id, "expired", "system");
       return;
     }
     const note = found.status === "invalid" ? found.reason.slice(0, 200) : null;
     if (note !== p.last_error)
-      db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(note, p.id);
+      await db.prepare("UPDATE withdrawal_fee_payments SET last_error = ? WHERE id = ?").run(note, p.id);
   } finally {
     feeChecking.delete(paymentId);
   }
@@ -917,7 +884,7 @@ async function checkFeePayment(paymentId) {
 
 async function reconcileFeePayments() {
   if (!feeRpc) return 0;
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT id FROM withdrawal_fee_payments
        WHERE status = 'awaiting'
@@ -947,7 +914,7 @@ app.use((req, res, next) => {
   next();
 });
 
-function auth(req, res, next) {
+async function auth(req, res, next) {
   const raw = req.get("X-Telegram-Init-Data");
   const telegram = verifyInitData(raw);
   if (!telegram) {
@@ -971,7 +938,7 @@ function auth(req, res, next) {
      exists. This is what stops "Account not found" after a restart or a
      first visit that never reached the signup call. */
   try {
-    ensureUser(telegram);
+    await ensureUser(telegram);
   } catch (error) {
     console.error("Could not create account:", error);
     return res.status(500).json({ error: "Could not load your account. Please try again." });
@@ -987,55 +954,54 @@ function adminAuth(req, res, next) {
   next();
 }
 
-app.get("/healthz", (_req, res) =>
+app.get("/healthz", async (_req, res) =>
   res.json({
     ok: true,
     botToken: Boolean(BOT_TOKEN),
     appOrigin: APP_ORIGIN || null,
     telegramBot: bot.enabled,
-    /* If "users" drops back to 0 after a restart, your database is on a disk
-       that gets wiped. Move DATABASE_PATH to persistent storage. */
-    users: db.prepare("SELECT COUNT(*) AS n FROM users").get().n,
-    databasePath: DATABASE_PATH,
+    /* Data lives in PostgreSQL (DATABASE_URL), not on this server's disk, so it survives restarts. */
+    users: (await db.prepare("SELECT COUNT(*) AS n FROM users").get()).n,
+    database: "postgres",
   }),
 );
 app.get("/", (_req, res) => res.sendFile(path.join(ROOT, "index.html")));
 app.use("/assets", express.static(path.join(ROOT, "assets")));
 
-app.get("/api/me", auth, (req, res) => {
-  res.json(publicProfile(req.telegram.id));
+app.get("/api/me", auth, async (req, res) => {
+  res.json(await publicProfile(req.telegram.id));
 });
 
-app.post("/api/signup", auth, (req, res) => {
-  const result = inTransaction(() => {
-    ensureUser(req.telegram);
-    const awarded = attachReferral(req.telegram.id, req.body?.ref);
-    db.prepare("UPDATE users SET welcomed = 1 WHERE telegram_id = ?").run(req.telegram.id);
-    return { ...publicProfile(req.telegram.id), referralAwarded: awarded };
+app.post("/api/signup", auth, async (req, res) => {
+  const result = await inTransaction(async () => {
+    await ensureUser(req.telegram);
+    const awarded = await attachReferral(req.telegram.id, req.body?.ref);
+    await db.prepare("UPDATE users SET welcomed = 1 WHERE telegram_id = ?").run(req.telegram.id);
+    return { ...(await publicProfile(req.telegram.id)), referralAwarded: awarded };
   });
   res.json(result);
 });
 
-app.get("/api/rewards", auth, (req, res) => {
-  res.json(publicProfile(req.telegram.id));
+app.get("/api/rewards", auth, async (req, res) => {
+  res.json(await publicProfile(req.telegram.id));
 });
 
-app.post("/api/redeem", auth, (req, res) => {
-  const result = inTransaction(() => {
-    ensureUser(req.telegram);
-    const awarded = attachReferral(req.telegram.id, req.body?.code);
+app.post("/api/redeem", auth, async (req, res) => {
+  const result = await inTransaction(async () => {
+    await ensureUser(req.telegram);
+    const awarded = await attachReferral(req.telegram.id, req.body?.code);
     if (!awarded) {
-      const user = findUser(req.telegram.id);
+      const user = await findUser(req.telegram.id);
       if (user.referred_by) throw new ApiError(409, "A referral code has already been used.");
       throw new ApiError(400, "That referral code is not valid.");
     }
-    return { ...publicProfile(req.telegram.id), referralAwarded: true };
+    return { ...(await publicProfile(req.telegram.id)), referralAwarded: true };
   });
   res.json(result);
 });
 
-app.get("/api/balance", auth, (req, res) => {
-  const profile = publicProfile(req.telegram.id);
+app.get("/api/balance", auth, async (req, res) => {
+  const profile = await publicProfile(req.telegram.id);
   res.json({
     credits: profile.credits,
     usdc: profile.usdc,
@@ -1063,7 +1029,7 @@ function publicCard(row) {
   };
 }
 
-app.get("/api/packs", auth, (_req, res) => {
+app.get("/api/packs", auth, async (_req, res) => {
   res.json({
     buyback: CARD_BUYBACK,
     packs: PACKS.map((pack) => {
@@ -1081,34 +1047,33 @@ app.get("/api/packs", auth, (_req, res) => {
   });
 });
 
-app.post("/api/packs/buy", auth, (req, res) => {
+app.post("/api/packs/buy", auth, async (req, res) => {
   const pack = PACKS.find((item) => item.id === req.body?.packId);
   if (!pack) throw new ApiError(404, "That pack does not exist.");
   if (!PACK_STATUS.get(pack.id).available)
     throw new ApiError(503, "This pack is not open for purchase right now.");
   const priceMicros = toMicros(pack.price);
 
-  const result = inTransaction(() => {
-    const user = findUser(req.telegram.id);
-    const spendable = user.credits_micros - whoopReserved(user.telegram_id);
+  const result = await inTransaction(async () => {
+    const user = await findUser(req.telegram.id);
+    const spendable = user.credits_micros - await whoopReserved(user.telegram_id);
     if (spendable < priceMicros)
       throw new ApiError(402, "Not enough credits. Tap + to add funds.");
 
-    db.prepare("UPDATE users SET credits_micros = credits_micros - ? WHERE telegram_id = ?").run(
+    await db.prepare("UPDATE users SET credits_micros = credits_micros - ? WHERE telegram_id = ?").run(
       priceMicros,
       user.telegram_id,
     );
     const { index, value } = drawPack(pack);
     const playerIdx = crypto.randomInt(PLAYERS_PER_POOL);
     const elite = pack.elite && index >= 3 ? 1 : 0;
-    const info = db
+    const card = await db
       .prepare(
         `INSERT INTO cards (telegram_id, pack_id, price_micros, value_micros, odds_index, player_idx, elite)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *`,
       )
-      .run(user.telegram_id, pack.id, priceMicros, toMicros(value), index, playerIdx, elite);
-    const card = db.prepare("SELECT * FROM cards WHERE id = ?").get(Number(info.lastInsertRowid));
-    audit(`user:${user.telegram_id}`, "pack_bought", String(card.id), {
+      .get(user.telegram_id, pack.id, priceMicros, toMicros(value), index, playerIdx, elite);
+    await audit(`user:${user.telegram_id}`, "pack_bought", String(card.id), {
       pack: pack.id,
       price: priceMicros,
       value: card.value_micros,
@@ -1116,17 +1081,17 @@ app.post("/api/packs/buy", auth, (req, res) => {
     return card;
   });
 
-  res.json({ card: publicCard(result), credits: publicProfile(req.telegram.id).credits });
+  res.json({ card: publicCard(result), credits: (await publicProfile(req.telegram.id)).credits });
 });
 
-app.get("/api/cards", auth, (req, res) => {
-  const rows = db
+app.get("/api/cards", auth, async (req, res) => {
+  const rows = await db
     .prepare("SELECT * FROM cards WHERE telegram_id = ? AND status = 'owned' ORDER BY id DESC")
     .all(req.telegram.id);
   res.json({ cards: rows.map(publicCard) });
 });
 
-app.post("/api/cards/sell", auth, (req, res) => {
+app.post("/api/cards/sell", auth, async (req, res) => {
   const to = req.body?.to;
   if (to !== "credits" && to !== "usdc")
     throw new ApiError(400, "Choose pack credits or USDC.");
@@ -1134,44 +1099,44 @@ app.post("/api/cards/sell", auth, (req, res) => {
   if (!Number.isSafeInteger(cardId) || cardId <= 0)
     throw new ApiError(400, "Choose a card to sell.");
 
-  const paid = inTransaction(() => {
-    const card = db
+  const paid = await inTransaction(async () => {
+    const card = await db
       .prepare("SELECT * FROM cards WHERE id = ? AND telegram_id = ?")
       .get(cardId, req.telegram.id);
     if (!card) throw new ApiError(404, "Card not found.");
     if (card.status !== "owned") throw new ApiError(409, "That card was already sold.");
     const payout = sellBackMicros(card.value_micros);
-    db.prepare(
+    await db.prepare(
       "UPDATE cards SET status = 'sold', sold_micros = ?, sold_at = CURRENT_TIMESTAMP WHERE id = ?",
     ).run(payout, card.id);
     const column = to === "usdc" ? "usdc_micros" : "credits_micros";
-    db.prepare(`UPDATE users SET ${column} = ${column} + ? WHERE telegram_id = ?`).run(
+    await db.prepare(`UPDATE users SET ${column} = ${column} + ? WHERE telegram_id = ?`).run(
       payout,
       req.telegram.id,
     );
-    audit(`user:${req.telegram.id}`, "card_sold", String(card.id), { payout, to });
+    await audit(`user:${req.telegram.id}`, "card_sold", String(card.id), { payout, to });
     return payout;
   });
 
-  const profile = publicProfile(req.telegram.id);
+  const profile = await publicProfile(req.telegram.id);
   res.json({ paid: paid / MICRO, credits: profile.credits, usdc: profile.usdc });
 });
 
-app.get("/api/deposit-address", auth, (_req, res) => {
+app.get("/api/deposit-address", auth, async (_req, res) => {
   if (!isSolanaAddress(DEPOSIT_ADDRESS))
     return res.status(503).json({ error: "Crypto deposits are not configured." });
   res.json({ address: DEPOSIT_ADDRESS });
 });
 
-app.post("/api/link-wallet/challenge", auth, (req, res) => {
+app.post("/api/link-wallet/challenge", auth, async (req, res) => {
   const address = req.body?.address;
   if (!isSolanaAddress(address) || address === DEPOSIT_ADDRESS)
     return res.status(400).json({ error: "Enter a valid Solana address." });
 
-  const user = inTransaction(() => ensureUser(req.telegram));
+  const user = await inTransaction(async () => await ensureUser(req.telegram));
   const nonce = crypto.randomBytes(24).toString("hex");
   const message = walletChallengeMessage(user.telegram_id, address, nonce);
-  db.prepare(
+  await db.prepare(
     `INSERT INTO wallet_link_challenges (telegram_id, address, nonce, expires_at)
      VALUES (?, ?, ?, ?) ON CONFLICT(telegram_id) DO UPDATE SET
        address = excluded.address, nonce = excluded.nonce, expires_at = excluded.expires_at`,
@@ -1179,9 +1144,9 @@ app.post("/api/link-wallet/challenge", auth, (req, res) => {
   res.json({ nonce, message });
 });
 
-app.post("/api/link-wallet", auth, (req, res) => {
+app.post("/api/link-wallet", auth, async (req, res) => {
   const { address, nonce, signature } = req.body || {};
-  const challenge = db
+  const challenge = await db
     .prepare("SELECT * FROM wallet_link_challenges WHERE telegram_id = ?")
     .get(req.telegram.id);
   if (
@@ -1196,8 +1161,8 @@ app.post("/api/link-wallet", auth, (req, res) => {
   if (!verifyWalletSignature(address, message, signature))
     return res.status(400).json({ error: "Wallet signature could not be verified." });
 
-  inTransaction(() => {
-    const current = db
+  await inTransaction(async () => {
+    const current = await db
       .prepare("SELECT * FROM wallet_link_challenges WHERE telegram_id = ?")
       .get(req.telegram.id);
     if (
@@ -1207,24 +1172,24 @@ app.post("/api/link-wallet", auth, (req, res) => {
       current.expires_at < Date.now()
     )
       throw new ApiError(400, "Wallet link request expired. Try again.");
-    const owner = db
+    const owner = await db
       .prepare("SELECT telegram_id FROM users WHERE wallet = ?")
       .get(address);
     if (owner && owner.telegram_id !== req.telegram.id)
       throw new ApiError(409, "That wallet is already linked to another account.");
-    db.prepare("UPDATE users SET wallet = ? WHERE telegram_id = ?").run(
+    await db.prepare("UPDATE users SET wallet = ? WHERE telegram_id = ?").run(
       address,
       req.telegram.id,
     );
-    const unclaimed = db
+    const unclaimed = await db
       .prepare("SELECT * FROM unclaimed_deposits WHERE sender = ?")
       .all(address);
     for (const deposit of unclaimed) {
-      const inserted = db
+      const inserted = await db
         .prepare(
-          `INSERT OR IGNORE INTO deposits
+          `INSERT INTO deposits
             (signature, transfer_index, telegram_id, token, amount_micros)
-           VALUES (?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
         )
         .run(
           deposit.signature,
@@ -1234,43 +1199,43 @@ app.post("/api/link-wallet", auth, (req, res) => {
           deposit.amount_micros,
         );
       if (inserted.changes) {
-        db.prepare(
+        await db.prepare(
           "UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id = ?",
         ).run(deposit.amount_micros, req.telegram.id);
       }
-      db.prepare(
+      await db.prepare(
         "DELETE FROM unclaimed_deposits WHERE signature = ? AND transfer_index = ?",
       ).run(deposit.signature, deposit.transfer_index);
     }
-    db.prepare("DELETE FROM wallet_link_challenges WHERE telegram_id = ?").run(
+    await db.prepare("DELETE FROM wallet_link_challenges WHERE telegram_id = ?").run(
       req.telegram.id,
     );
   });
   res.json({ wallet: address });
 });
 
-app.get("/admin/withdrawals", adminAuth, (req, res) => {
+app.get("/admin/withdrawals", adminAuth, async (req, res) => {
   const status = req.query.status === "all" ? null : "pending";
   /* Requests still waiting for their processing fee are not reviewable, so they are not
      in the pending queue. */
   const requests = status
-    ? db
+    ? await db
         .prepare(
-          `SELECT w.id, w.telegram_id AS telegramId, w.token, w.destination,
+          `SELECT w.id, w.telegram_id AS "telegramId", w.token, w.destination,
             w.amount_micros * 1.0 / ? AS amount, w.fee_micros * 1.0 / ? AS fee,
             (w.amount_micros - w.fee_micros) * 1.0 / ? AS receive, w.status, w.stage,
-            w.created_at AS createdAt, p.signature AS feeTxHash, p.amount_micros * 1.0 / ? AS feePaid
+            w.created_at AS "createdAt", p.signature AS "feeTxHash", p.amount_micros * 1.0 / ? AS "feePaid"
            FROM withdrawal_requests w LEFT JOIN withdrawal_fee_payments p ON p.withdrawal_id = w.id
            WHERE w.status = ? AND w.stage = 'queued' ORDER BY w.created_at`,
         )
         .all(MICRO, MICRO, MICRO, MICRO, status)
-    : db
+    : await db
         .prepare(
-          `SELECT w.id, w.telegram_id AS telegramId, w.token, w.destination,
+          `SELECT w.id, w.telegram_id AS "telegramId", w.token, w.destination,
             w.amount_micros * 1.0 / ? AS amount, w.fee_micros * 1.0 / ? AS fee,
             (w.amount_micros - w.fee_micros) * 1.0 / ? AS receive, w.status, w.stage,
-            w.created_at AS createdAt, p.signature AS feeTxHash, p.amount_micros * 1.0 / ? AS feePaid,
-            w.payout_reference AS payoutTxHash
+            w.created_at AS "createdAt", p.signature AS "feeTxHash", p.amount_micros * 1.0 / ? AS "feePaid",
+            w.payout_reference AS "payoutTxHash"
            FROM withdrawal_requests w LEFT JOIN withdrawal_fee_payments p ON p.withdrawal_id = w.id
            ORDER BY w.created_at DESC LIMIT 500`,
         )
@@ -1278,11 +1243,11 @@ app.get("/admin/withdrawals", adminAuth, (req, res) => {
   res.json({ requests });
 });
 
-app.get("/admin/unclaimed-deposits", adminAuth, (_req, res) => {
-  const deposits = db
+app.get("/admin/unclaimed-deposits", adminAuth, async (_req, res) => {
+  const deposits = await db
     .prepare(
-      `SELECT signature, transfer_index AS transferIndex, sender, token,
-        amount_micros * 1.0 / ? AS amount, created_at AS createdAt
+      `SELECT signature, transfer_index AS "transferIndex", sender, token,
+        amount_micros * 1.0 / ? AS amount, created_at AS "createdAt"
        FROM unclaimed_deposits ORDER BY created_at DESC LIMIT 500`,
     )
     .all(MICRO);
@@ -1291,7 +1256,7 @@ app.get("/admin/unclaimed-deposits", adminAuth, (_req, res) => {
 
 /* The old on-chain route puts requests into manual review. Withdrawals now go straight to
    Whoop (POST /api/whoop/withdraw), so this route is off unless ONCHAIN_WITHDRAWALS_ENABLED=1. */
-app.post("/api/withdraw", auth, (req, res) => {
+app.post("/api/withdraw", auth, async (req, res) => {
   if (process.env.ONCHAIN_WITHDRAWALS_ENABLED !== "1")
     return res.status(410).json({ error: "On-chain withdrawals are disabled. Withdraw to your Whoop Wallet instead." });
   const token = req.body?.token;
@@ -1308,11 +1273,11 @@ app.post("/api/withdraw", auth, (req, res) => {
 
   if (FEE_ENABLED) rateLimit(`withdraw:${req.telegram.id}`, 10, 10 * 60_000);
 
-  const request = inTransaction(() => {
-    const user = findUser(req.telegram.id);
+  const request = await inTransaction(async () => {
+    const user = await findUser(req.telegram.id);
     if (!user) throw new ApiError(404, "Account not found.");
     if (FEE_ENABLED) {
-      const open = db
+      const open = await db
         .prepare(
           `SELECT id FROM withdrawal_requests
            WHERE telegram_id = ? AND status = 'pending' AND stage = 'awaiting_fee'`,
@@ -1324,25 +1289,26 @@ app.post("/api/withdraw", auth, (req, res) => {
           "You already have a withdrawal waiting for its processing fee. Finish or cancel it first.",
         );
     }
-    const reserved = db
+    const reservedRow = await db
       .prepare(
         `SELECT COALESCE(SUM(amount_micros), 0) AS amount FROM withdrawal_requests
          WHERE telegram_id = ? AND token = ? AND status = 'pending'`,
       )
-      .get(req.telegram.id, token).amount;
-    if (user[`${token}_micros`] - reserved - whoopReserved(req.telegram.id, token) < amount)
+      .get(req.telegram.id, token);
+    const reserved = reservedRow.amount;
+    if (user[`${token}_micros`] - reserved - await whoopReserved(req.telegram.id, token) < amount)
       throw new ApiError(400, "Insufficient available balance.");
     const id = crypto.randomUUID();
     if (FEE_ENABLED) {
       /* The processing fee is paid on-chain, separately, so it is not also taken out of the
          withdrawal: fee_micros is 0 and the user receives the full amount. */
-      db.prepare(
+      await db.prepare(
         `INSERT INTO withdrawal_requests
           (id, telegram_id, token, destination, amount_micros, fee_micros, stage)
          VALUES (?, ?, ?, ?, ?, 0, 'awaiting_fee')`,
       ).run(id, req.telegram.id, token, destination, amount);
       const now = Date.now();
-      db.prepare(
+      await db.prepare(
         `INSERT INTO withdrawal_fee_payments
           (id, withdrawal_id, telegram_id, reference, recipient, mint, amount_micros, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1357,7 +1323,7 @@ app.post("/api/withdraw", auth, (req, res) => {
         now,
         now + FEE_TTL_MS,
       );
-      audit(`user:${req.telegram.id}`, "withdrawal_requested", id, {
+      await audit(`user:${req.telegram.id}`, "withdrawal_requested", id, {
         token,
         amount,
         destination,
@@ -1366,7 +1332,7 @@ app.post("/api/withdraw", auth, (req, res) => {
       });
       return id;
     }
-    db.prepare(
+    await db.prepare(
       `INSERT INTO withdrawal_requests
         (id, telegram_id, token, destination, amount_micros, fee_micros)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1374,8 +1340,8 @@ app.post("/api/withdraw", auth, (req, res) => {
     return id;
   });
   if (FEE_ENABLED) {
-    const w = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(request);
-    return res.status(202).json(publicFeeWithdrawal(w, feePaymentFor(request)));
+    const w = await db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(request);
+    return res.status(202).json(publicFeeWithdrawal(w, await feePaymentFor(request)));
   }
   res.status(202).json({
     id: request,
@@ -1386,7 +1352,7 @@ app.post("/api/withdraw", auth, (req, res) => {
 });
 
 /* Withdrawal processing fee: what the app needs to explain and collect it. */
-app.get("/api/withdraw/config", auth, (_req, res) => {
+app.get("/api/withdraw/config", auth, async (_req, res) => {
   res.json({
     feeRequired: FEE_ENABLED,
     fee: WITHDRAWAL_FEE / MICRO,
@@ -1396,8 +1362,8 @@ app.get("/api/withdraw/config", auth, (_req, res) => {
   });
 });
 
-function ownWithdrawal(req) {
-  const w = db
+async function ownWithdrawal(req) {
+  const w = await db
     .prepare("SELECT * FROM withdrawal_requests WHERE id = ? AND telegram_id = ?")
     .get(String(req.params.id), req.telegram.id);
   if (!w) throw new ApiError(404, "Withdrawal not found.");
@@ -1405,7 +1371,7 @@ function ownWithdrawal(req) {
 }
 
 app.get("/api/withdraw/open", auth, async (req, res) => {
-  const w = db
+  const w = await db
     .prepare(
       `SELECT * FROM withdrawal_requests
        WHERE telegram_id = ? AND status = 'pending' AND stage = 'awaiting_fee'
@@ -1413,41 +1379,41 @@ app.get("/api/withdraw/open", auth, async (req, res) => {
     )
     .get(req.telegram.id);
   if (!w) return res.json({ withdrawal: null });
-  const p = feePaymentFor(w.id);
+  const p = await feePaymentFor(w.id);
   await checkFeePayment(p.id);
-  const fresh = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
-  res.json({ withdrawal: publicFeeWithdrawal(fresh, feePaymentFor(w.id)) });
+  const fresh = await db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
+  res.json({ withdrawal: publicFeeWithdrawal(fresh, await feePaymentFor(w.id)) });
 });
 
 app.get("/api/withdraw/:id", auth, async (req, res) => {
-  const w = ownWithdrawal(req);
-  let p = feePaymentFor(w.id);
+  const w = await ownWithdrawal(req);
+  let p = await feePaymentFor(w.id);
   /* Opening this status is what asks the chain "has it arrived?" — the answer comes from
      the chain, not from anything the browser says. Lookups are throttled per payment. */
   if (p && p.status === "awaiting" && Date.now() - (feeLastCheck.get(p.id) || 0) > 3000) {
     feeLastCheck.set(p.id, Date.now());
     await checkFeePayment(p.id);
-    p = feePaymentFor(w.id);
+    p = await feePaymentFor(w.id);
   }
-  const fresh = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
+  const fresh = await db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
   res.json(publicFeeWithdrawal(fresh, p));
 });
 
 app.post("/api/withdraw/:id/cancel", auth, async (req, res) => {
-  const w = ownWithdrawal(req);
-  const p = feePaymentFor(w.id);
+  const w = await ownWithdrawal(req);
+  const p = await feePaymentFor(w.id);
   if (!p) throw new ApiError(409, "This withdrawal has no pending fee to cancel.");
   /* Look at the chain first so a payment that is already on its way is never cancelled. */
   await checkFeePayment(p.id);
-  const now = feePaymentFor(w.id);
+  const now = await feePaymentFor(w.id);
   if (now.status === "confirmed")
     throw new ApiError(409, "Your fee payment was already received, so this withdrawal is queued.");
-  if (now.status === "awaiting") closeUnpaidFee(now.id, "cancelled", `user:${req.telegram.id}`);
-  const fresh = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
-  res.json(publicFeeWithdrawal(fresh, feePaymentFor(w.id)));
+  if (now.status === "awaiting") await closeUnpaidFee(now.id, "cancelled", `user:${req.telegram.id}`);
+  const fresh = await db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(w.id);
+  res.json(publicFeeWithdrawal(fresh, await feePaymentFor(w.id)));
 });
 
-app.post("/admin/withdrawals/:id/review", adminAuth, (req, res) => {
+app.post("/admin/withdrawals/:id/review", adminAuth, async (req, res) => {
   const { action, reference } = req.body || {};
   if (!["paid", "reject"].includes(action))
     return res.status(400).json({ error: "Choose paid or reject." });
@@ -1457,8 +1423,8 @@ app.post("/admin/withdrawals/:id/review", adminAuth, (req, res) => {
   )
     return res.status(400).json({ error: "A payout reference is required." });
 
-  inTransaction(() => {
-    const request = db
+  await inTransaction(async () => {
+    const request = await db
       .prepare("SELECT * FROM withdrawal_requests WHERE id = ?")
       .get(req.params.id);
     if (!request) throw new ApiError(404, "Withdrawal request not found.");
@@ -1469,39 +1435,39 @@ app.post("/admin/withdrawals/:id/review", adminAuth, (req, res) => {
     if (action === "reject") {
       /* The fee was paid for a withdrawal that will not happen, so it goes back to the
          user's USDC balance. */
-      const fee = feePaymentFor(request.id);
+      const fee = await feePaymentFor(request.id);
       if (fee && fee.status === "confirmed") {
-        db.prepare("UPDATE users SET usdc_micros = usdc_micros + ? WHERE telegram_id = ?").run(
+        await db.prepare("UPDATE users SET usdc_micros = usdc_micros + ? WHERE telegram_id = ?").run(
           fee.amount_micros,
           request.telegram_id,
         );
-        db.prepare("UPDATE withdrawal_fee_payments SET status = 'refunded', closed_at = ? WHERE id = ?").run(
+        await db.prepare("UPDATE withdrawal_fee_payments SET status = 'refunded', closed_at = ? WHERE id = ?").run(
           Date.now(),
           fee.id,
         );
-        audit("admin", "withdrawal_fee_refunded", request.id, { amountMicros: fee.amount_micros });
+        await audit("admin", "withdrawal_fee_refunded", request.id, { amountMicros: fee.amount_micros });
       }
     }
     if (action === "paid") {
       const column = `${request.token}_micros`;
-      const result = db
+      const result = await db
         .prepare(`UPDATE users SET ${column} = ${column} - ? WHERE telegram_id = ? AND ${column} >= ?`)
         .run(request.amount_micros, request.telegram_id, request.amount_micros);
       if (result.changes !== 1)
         throw new ApiError(409, "Account balance changed; request was not completed.");
     }
-    db.prepare(
+    await db.prepare(
       `UPDATE withdrawal_requests SET status = ?, payout_reference = ?, processed_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
     ).run(action === "paid" ? "paid" : "rejected", action === "paid" ? reference.trim() : null, request.id);
-    audit("admin", action === "paid" ? "withdrawal_paid" : "withdrawal_rejected", request.id, {
+    await audit("admin", action === "paid" ? "withdrawal_paid" : "withdrawal_rejected", request.id, {
       reference: action === "paid" ? reference.trim() : null,
     });
   });
   res.json({ status: action === "paid" ? "paid" : "rejected" });
 });
 
-app.post("/webhook/helius", (req, res) => {
+app.post("/webhook/helius", async (req, res) => {
   if (!HELIUS_AUTH)
     return res.status(503).json({ error: "Deposit webhook is not configured." });
   if (!webhookAuthorized(req.get("authorization")))
@@ -1510,7 +1476,7 @@ app.post("/webhook/helius", (req, res) => {
     return res.status(400).json({ error: "Expected a Helius transaction array." });
 
   let credited = 0;
-  inTransaction(() => {
+  await inTransaction(async () => {
     for (const tx of req.body) {
       if (
         !tx ||
@@ -1521,41 +1487,41 @@ app.post("/webhook/helius", (req, res) => {
         !Array.isArray(tx.tokenTransfers)
       )
         continue;
-      tx.tokenTransfers.forEach((transfer, transferIndex) => {
+      for (const [transferIndex, transfer] of tx.tokenTransfers.entries()) {
         if (
           transfer?.toUserAccount !== DEPOSIT_ADDRESS ||
           !MINTS.has(transfer.mint) ||
           typeof transfer.fromUserAccount !== "string"
         )
-          return;
+          continue;
         const amount = toMicros(transfer.tokenAmount);
-        if (!amount) return;
+        if (!amount) continue;
         const token = MINTS.get(transfer.mint);
-        const user = db
+        const user = await db
           .prepare("SELECT telegram_id FROM users WHERE wallet = ?")
           .get(transfer.fromUserAccount);
         if (!user) {
-          db.prepare(
-            `INSERT OR IGNORE INTO unclaimed_deposits
+          await db.prepare(
+            `INSERT INTO unclaimed_deposits
               (signature, transfer_index, sender, token, amount_micros)
-             VALUES (?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
           ).run(tx.signature, transferIndex, transfer.fromUserAccount, token, amount);
-          return;
+          continue;
         }
-        const inserted = db
+        const inserted = await db
           .prepare(
-            `INSERT OR IGNORE INTO deposits
+            `INSERT INTO deposits
               (signature, transfer_index, telegram_id, token, amount_micros)
-             VALUES (?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
           )
           .run(tx.signature, transferIndex, user.telegram_id, token, amount);
         if (inserted.changes) {
-          db.prepare(
+          await db.prepare(
             "UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id = ?",
           ).run(amount, user.telegram_id);
           credited++;
         }
-      });
+      }
     }
   });
   res.json({ creditedTransfers: credited });
@@ -1575,37 +1541,37 @@ app.post("/telegram/webhook", (req, res) => {
   bot.handleUpdate(req.body);
 });
 
-function activationRow(id) {
-  return db.prepare("SELECT * FROM whoop_activation WHERE telegram_id = ?").get(id);
+async function activationRow(id) {
+  return await db.prepare("SELECT * FROM whoop_activation WHERE telegram_id = ?").get(id);
 }
 
 /* Withdrawals need the one-time activation payment first (only when the SOL check is configured). */
-function requireActivation(id) {
+async function requireActivation(id) {
   if (!ACTIVATION_ENABLED) return;
-  const row = activationRow(id);
+  const row = await activationRow(id);
   if (!row || !row.paid_at)
     throw new ApiError(402, "Pay the one-time activation fee before your first withdrawal.");
 }
 
-function whoopStatus(id) {
-  const link = whoopLink(id);
-  const pending = db
+async function whoopStatus(id) {
+  const link = await whoopLink(id);
+  const pending = await db
     .prepare("SELECT * FROM whoop_withdrawals WHERE telegram_id = ? AND status = 'pending' ORDER BY created_at")
     .all(id);
   return {
     configured: whoopConfigured(),
     linked: !!link,
     whoopUsername: link ? link.whoop_username : null,
-    available: withdrawableMicros(id) / MICRO,
+    available: await withdrawableMicros(id) / MICRO,
     balances: {
-      credits: withdrawableMicros(id, "credits") / MICRO,
-      usdc: withdrawableMicros(id, "usdc") / MICRO,
-      usdt: withdrawableMicros(id, "usdt") / MICRO,
+      credits: await withdrawableMicros(id, "credits") / MICRO,
+      usdc: await withdrawableMicros(id, "usdc") / MICRO,
+      usdt: await withdrawableMicros(id, "usdt") / MICRO,
     },
-    fee: whoopFeeMicros() / MICRO,
+    fee: await whoopFeeMicros() / MICRO,
     activation: {
       required: ACTIVATION_ENABLED,
-      paid: !ACTIVATION_ENABLED || !!activationRow(id)?.paid_at,
+      paid: !ACTIVATION_ENABLED || !!(await activationRow(id))?.paid_at,
       sol: ACTIVATION_LAMPORTS / 1e9,
     },
     min: MIN_WITHDRAWAL / MICRO,
@@ -1613,14 +1579,14 @@ function whoopStatus(id) {
   };
 }
 
-app.get("/api/whoop/status", auth, (req, res) => {
-  inTransaction(() => ensureUser(req.telegram));
-  res.json(whoopStatus(req.telegram.id));
+app.get("/api/whoop/status", auth, async (req, res) => {
+  await inTransaction(async () => await ensureUser(req.telegram));
+  res.json(await whoopStatus(req.telegram.id));
 });
 
 app.post("/api/whoop/link", auth, async (req, res) => {
   rateLimit(`whoop-link:${req.telegram.id}`, 10, 10 * 60 * 1000);
-  inTransaction(() => ensureUser(req.telegram));
+  await inTransaction(async () => await ensureUser(req.telegram));
   const code = typeof req.body?.code === "string" ? req.body.code.slice(0, 20) : "";
   if (!code) throw new ApiError(400, "Enter the link code from Whoop Wallet.");
   let whoop;
@@ -1633,45 +1599,45 @@ app.post("/api/whoop/link", auth, async (req, res) => {
   }
   if (String(whoop.telegramId) !== req.telegram.id)
     throw new ApiError(403, "That Whoop Wallet belongs to a different Telegram account.");
-  inTransaction(() => {
-    const current = whoopLink(req.telegram.id);
-    if (current && current.whoop_username !== whoop.username && whoopReservedAll(req.telegram.id) > 0)
+  await inTransaction(async () => {
+    const current = await whoopLink(req.telegram.id);
+    if (current && current.whoop_username !== whoop.username && await whoopReservedAll(req.telegram.id) > 0)
       throw new ApiError(409, "Wait for your pending withdrawal to finish before changing wallets.");
-    db.prepare(
+    await db.prepare(
       `INSERT INTO whoop_links (telegram_id, whoop_username, whoop_name) VALUES (?, ?, ?)
        ON CONFLICT(telegram_id) DO UPDATE SET whoop_username = excluded.whoop_username,
          whoop_name = excluded.whoop_name, linked_at = CURRENT_TIMESTAMP`,
     ).run(req.telegram.id, String(whoop.username), whoop.name ? String(whoop.name).slice(0, 60) : null);
-    audit(`user:${req.telegram.id}`, "whoop_linked", req.telegram.id, { whoopUsername: whoop.username });
+    await audit(`user:${req.telegram.id}`, "whoop_linked", req.telegram.id, { whoopUsername: whoop.username });
   });
-  res.json(whoopStatus(req.telegram.id));
+  res.json(await whoopStatus(req.telegram.id));
 });
 
-app.post("/api/whoop/unlink", auth, (req, res) => {
-  inTransaction(() => {
-    if (whoopReservedAll(req.telegram.id) > 0)
+app.post("/api/whoop/unlink", auth, async (req, res) => {
+  await inTransaction(async () => {
+    if (await whoopReservedAll(req.telegram.id) > 0)
       throw new ApiError(409, "Wait for your pending withdrawal to finish before disconnecting.");
-    const removed = db.prepare("DELETE FROM whoop_links WHERE telegram_id = ?").run(req.telegram.id);
-    if (removed.changes) audit(`user:${req.telegram.id}`, "whoop_unlinked", req.telegram.id);
+    const removed = await db.prepare("DELETE FROM whoop_links WHERE telegram_id = ?").run(req.telegram.id);
+    if (removed.changes) await audit(`user:${req.telegram.id}`, "whoop_unlinked", req.telegram.id);
   });
-  res.json(whoopStatus(req.telegram.id));
+  res.json(await whoopStatus(req.telegram.id));
 });
 
 /* Creates (once) and checks the user's activation payment. The browser polls this while the user pays. */
 app.get("/api/whoop/activation", auth, async (req, res) => {
-  inTransaction(() => ensureUser(req.telegram));
+  await inTransaction(async () => await ensureUser(req.telegram));
   const id = req.telegram.id;
   if (!ACTIVATION_ENABLED) return res.json({ required: false, paid: true });
   rateLimit(`activation:${id}`, 120, 10 * 60_000);
-  let row = inTransaction(() => {
-    let r = activationRow(id);
+  let row = await inTransaction(async () => {
+    let r = await activationRow(id);
     if (!r) {
-      db.prepare("INSERT INTO whoop_activation (telegram_id, reference, lamports) VALUES (?, ?, ?)").run(
+      await db.prepare("INSERT INTO whoop_activation (telegram_id, reference, lamports) VALUES (?, ?, ?)").run(
         id,
         newReference(),
         ACTIVATION_LAMPORTS,
       );
-      r = activationRow(id);
+      r = await activationRow(id);
     }
     return r;
   });
@@ -1683,19 +1649,19 @@ app.get("/api/whoop/activation", auth, async (req, res) => {
         minLamports: row.lamports,
       });
       if (found.status === "paid") {
-        inTransaction(() => {
-          const done = db
+        await inTransaction(async () => {
+          const done = await db
             .prepare(
               "UPDATE whoop_activation SET paid_at = CURRENT_TIMESTAMP, signature = ?, payer = ? WHERE telegram_id = ? AND paid_at IS NULL",
             )
             .run(found.signature, found.payer, id);
           if (done.changes)
-            audit(`user:${id}`, "whoop_activation_paid", id, {
+            await audit(`user:${id}`, "whoop_activation_paid", id, {
               signature: found.signature,
               lamports: found.receivedLamports,
             });
         });
-        row = activationRow(id);
+        row = await activationRow(id);
       }
     } catch (error) {
       if (!(error instanceof RpcError)) throw error; /* chain unreadable: stay pending, try again */
@@ -1717,15 +1683,15 @@ app.get("/api/whoop/activation", auth, async (req, res) => {
   });
 });
 
-app.get("/api/whoop/quote", auth, (req, res) => {
-  const link = whoopLink(req.telegram.id);
+app.get("/api/whoop/quote", auth, async (req, res) => {
+  const link = await whoopLink(req.telegram.id);
   if (!link) throw new ApiError(409, "Connect your Whoop Wallet first.");
-  requireActivation(req.telegram.id);
+  await requireActivation(req.telegram.id);
   const amount = toMicros(req.query.amount);
   if (!amount) throw new ApiError(400, "Enter a valid amount.");
   const token = whoopToken(req.query.token);
-  const quote = quoteFor(amount);
-  if (quote.amount > withdrawableMicros(req.telegram.id, token))
+  const quote = await quoteFor(amount);
+  if (quote.amount > await withdrawableMicros(req.telegram.id, token))
     throw new ApiError(400, "Insufficient available balance.");
   res.json({
     token,
@@ -1746,8 +1712,8 @@ app.post("/api/whoop/withdraw", auth, async (req, res) => {
   if (!amount) throw new ApiError(400, "Enter a valid amount.");
   const token = whoopToken(req.body?.token);
 
-  const row = inTransaction(() => {
-    const existing = db
+  const row = await inTransaction(async () => {
+    const existing = await db
       .prepare("SELECT * FROM whoop_withdrawals WHERE telegram_id = ? AND idempotency_key = ?")
       .get(req.telegram.id, idempotencyKey);
     if (existing) {
@@ -1755,53 +1721,53 @@ app.post("/api/whoop/withdraw", auth, async (req, res) => {
         throw new ApiError(409, "That request ID was already used for a different withdrawal.");
       return existing;
     }
-    const link = whoopLink(req.telegram.id);
+    const link = await whoopLink(req.telegram.id);
     if (!link) throw new ApiError(409, "Connect your Whoop Wallet first.");
-    requireActivation(req.telegram.id);
-    const quote = quoteFor(amount);
+    await requireActivation(req.telegram.id);
+    const quote = await quoteFor(amount);
     if (toMicros(String(expectedFee)) !== quote.fee && !(expectedFee === 0 && quote.fee === 0))
       throw new ApiError(409, "The service fee changed. Review the withdrawal and confirm again.");
-    if (quote.amount > withdrawableMicros(req.telegram.id, token))
+    if (quote.amount > await withdrawableMicros(req.telegram.id, token))
       throw new ApiError(400, "Insufficient available balance.");
     const id = crypto.randomUUID();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO whoop_withdrawals
         (id, telegram_id, whoop_username, idempotency_key, amount_micros, fee_micros, net_micros, token)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(id, req.telegram.id, link.whoop_username, idempotencyKey, quote.amount, quote.fee, quote.net, token);
-    audit(`user:${req.telegram.id}`, "whoop_withdrawal_reserved", id, {
+    await audit(`user:${req.telegram.id}`, "whoop_withdrawal_reserved", id, {
       token,
       amount: quote.amount,
       fee: quote.fee,
       destination: link.whoop_username,
     });
-    return db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(id);
+    return await db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(id);
   });
 
   await attemptPayout(row.id);
-  const latest = db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(row.id);
+  const latest = await db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(row.id);
   const status = latest.status === "completed" ? 200 : latest.status === "failed" ? 422 : 202;
   res.status(status).json(publicWithdrawal(latest));
 });
 
-app.get("/api/whoop/withdrawals", auth, (req, res) => {
-  const rows = db
+app.get("/api/whoop/withdrawals", auth, async (req, res) => {
+  const rows = await db
     .prepare("SELECT * FROM whoop_withdrawals WHERE telegram_id = ? ORDER BY created_at DESC LIMIT 100")
     .all(req.telegram.id);
   res.json({ withdrawals: rows.map(publicWithdrawal) });
 });
 
-app.get("/api/whoop/withdrawals/:id", auth, (req, res) => {
-  const row = db
+app.get("/api/whoop/withdrawals/:id", auth, async (req, res) => {
+  const row = await db
     .prepare("SELECT * FROM whoop_withdrawals WHERE id = ? AND telegram_id = ?")
     .get(req.params.id, req.telegram.id);
   if (!row) throw new ApiError(404, "Withdrawal not found.");
   res.json(publicWithdrawal(row));
 });
 
-app.get("/admin/whoop-withdrawals", adminAuth, (req, res) => {
+app.get("/admin/whoop-withdrawals", adminAuth, async (req, res) => {
   const status = ["pending", "completed", "failed"].includes(req.query.status) ? req.query.status : null;
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT * FROM whoop_withdrawals ${status ? "WHERE status = ?" : ""} ORDER BY created_at DESC LIMIT 500`,
     )
@@ -1817,56 +1783,59 @@ app.get("/admin/whoop-withdrawals", adminAuth, (req, res) => {
   });
 });
 
-app.get("/admin/whoop-summary", adminAuth, (_req, res) => {
-  const by = (status) =>
-    db
+app.get("/admin/whoop-summary", adminAuth, async (_req, res) => {
+  const by = async (status) =>
+    await db
       .prepare(
         `SELECT COUNT(*) AS n, COALESCE(SUM(amount_micros), 0) AS amount, COALESCE(SUM(net_micros), 0) AS net
          FROM whoop_withdrawals WHERE status = ?`,
       )
       .get(status);
-  const done = by("completed");
-  const fees = db
+  const done = await by("completed");
+  const feesRow = await db
     .prepare("SELECT COALESCE(SUM(amount_micros), 0) AS n FROM ledger WHERE kind = 'service_fee'")
-    .get().n;
+    .get();
+  const fees = feesRow.n;
+  const pendingSummary = await by("pending");
+  const failedSummary = await by("failed");
   res.json({
     completed: done.n,
     volume: done.amount / MICRO,
     sentToWhoop: done.net / MICRO,
     feesCollected: fees / MICRO,
-    pending: by("pending").n,
-    pendingAmount: by("pending").amount / MICRO,
-    failed: by("failed").n,
-    currentFee: whoopFeeMicros() / MICRO,
+    pending: pendingSummary.n,
+    pendingAmount: pendingSummary.amount / MICRO,
+    failed: failedSummary.n,
+    currentFee: await whoopFeeMicros() / MICRO,
   });
 });
 
 app.post("/admin/whoop-withdrawals/:id/retry", adminAuth, async (req, res) => {
-  const row = db.prepare("SELECT status FROM whoop_withdrawals WHERE id = ?").get(req.params.id);
+  const row = await db.prepare("SELECT status FROM whoop_withdrawals WHERE id = ?").get(req.params.id);
   if (!row) throw new ApiError(404, "Withdrawal not found.");
   if (row.status !== "pending") throw new ApiError(409, "Only pending withdrawals can be retried.");
-  audit("admin", "whoop_withdrawal_retry", req.params.id);
+  await audit("admin", "whoop_withdrawal_retry", req.params.id);
   await attemptPayout(req.params.id);
-  res.json(publicWithdrawal(db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(req.params.id)));
+  res.json(publicWithdrawal(await db.prepare("SELECT * FROM whoop_withdrawals WHERE id = ?").get(req.params.id)));
 });
 
-app.post("/admin/settings/whoop-fee", adminAuth, (req, res) => {
+app.post("/admin/settings/whoop-fee", adminAuth, async (req, res) => {
   const rawFee = req.body?.fee;
   const fee = Number(rawFee) === 0 && rawFee !== "" && rawFee !== null && rawFee !== undefined ? 0 : toMicros(rawFee);
   if (fee === null || fee > MAX_WHOOP_FEE || fee % CENT !== 0)
     throw new ApiError(400, `Fee must be between $0 and $${MAX_WHOOP_FEE / MICRO}, in whole cents.`);
-  const previous = whoopFeeMicros();
-  db.prepare(
+  const previous = await whoopFeeMicros();
+  await db.prepare(
     `INSERT INTO settings (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
   ).run(WHOOP_FEE_KEY, String(fee));
-  audit("admin", "whoop_fee_changed", null, { from: previous, to: fee });
+  await audit("admin", "whoop_fee_changed", null, { from: previous, to: fee });
   res.json({ fee: fee / MICRO });
 });
 
 /* Testing only: give a user pack credits. Disabled unless ALLOW_TEST_CREDITS=1.
    Pack credits can be cashed out through Whoop, so leave this off in production. */
-app.post("/admin/credit", adminAuth, (req, res) => {
+app.post("/admin/credit", adminAuth, async (req, res) => {
   if (!/^(1|true|yes)$/i.test(process.env.ALLOW_TEST_CREDITS || ""))
     throw new ApiError(403, "Test credits are disabled. Set ALLOW_TEST_CREDITS=1 to enable them.");
   const amount = toMicros(req.body?.amount);
@@ -1876,28 +1845,28 @@ app.post("/admin/credit", adminAuth, (req, res) => {
   const { wallet, telegramId } = req.body || {};
   let user = null;
   if (typeof wallet === "string" && wallet)
-    user = db.prepare("SELECT * FROM users WHERE wallet = ?").get(wallet);
-  else if (telegramId) user = findUser(String(telegramId));
+    user = await db.prepare("SELECT * FROM users WHERE wallet = ?").get(wallet);
+  else if (telegramId) user = await findUser(String(telegramId));
   if (!user)
     throw new ApiError(
       404,
       "No user found. The wallet must be linked in the app first (Add funds > link wallet), or pass telegramId instead.",
     );
 
-  inTransaction(() => {
-    db.prepare("UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id = ?").run(
+  await inTransaction(async () => {
+    await db.prepare("UPDATE users SET credits_micros = credits_micros + ? WHERE telegram_id = ?").run(
       amount,
       user.telegram_id,
     );
-    audit("admin", "test_credit", user.telegram_id, { amount, wallet: user.wallet });
+    await audit("admin", "test_credit", user.telegram_id, { amount, wallet: user.wallet });
   });
-  res.json({ telegramId: user.telegram_id, wallet: user.wallet, credits: publicProfile(user.telegram_id).credits });
+  res.json({ telegramId: user.telegram_id, wallet: user.wallet, credits: (await publicProfile(user.telegram_id)).credits });
 });
 
-app.get("/admin/audit", adminAuth, (req, res) => {
+app.get("/admin/audit", adminAuth, async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 100, 500);
   res.json({
-    entries: db.prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?").all(limit),
+    entries: await db.prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?").all(limit),
   });
 });
 
@@ -1916,7 +1885,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   setInterval(() => {
     reconcileFeePayments().catch((error) => console.error("Fee payment reconcile failed:", error));
   }, 15_000).unref();
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`Phygitals server listening on port ${PORT}`);
     if (!BOT_TOKEN) console.warn("BOT_TOKEN is not set; Telegram API requests will be rejected.");
     if (/REPLACE/i.test(BOT_TOKEN)) console.warn("BOT_TOKEN still contains the REPLACE_WITH placeholder; sign-in will fail.");
@@ -1936,8 +1905,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
           "Withdrawals use the old behavior and take the fee out of the amount.",
       );
     console.log(
-      `Database: ${DATABASE_PATH} (${db.prepare("SELECT COUNT(*) AS n FROM users").get().n} users). ` +
-        "If this says 0 users after every restart, the disk is being wiped; set DATABASE_PATH to persistent storage.",
+      `Database: PostgreSQL (${(await db.prepare("SELECT COUNT(*) AS n FROM users").get()).n} users).`,
     );
     for (const pack of PACKS) {
       const s = PACK_STATUS.get(pack.id);
